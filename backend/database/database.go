@@ -885,6 +885,7 @@ func normalizeMapName(rawMapName string) string {
 		"REMAGEN":            "remagen",
 		"ST MARIE DU MONT":   "stmariedumont",
 		"SAINTE-MÈRE-ÉGLISE": "stmereeglise",
+		"SMOLENSK":           "smolensk",
 		"STALINGRAD":         "stalingrad",
 		"TOBRUK":             "tobruk",
 		"UTAH BEACH":         "utahbeach",
@@ -917,6 +918,7 @@ func normalizeMapName(rawMapName string) string {
 		"elalamein":       true,
 		"mortain":         true,
 		"elsenbornridge":  true,
+		"smolensk":        true,
 		"tobruk":          true,
 		"invalid":         true,
 	}

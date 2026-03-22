@@ -325,6 +325,12 @@ func (mm *MatchManager) DetectAndResumeOrCreateMatch(ctx context.Context, rconCl
 
 // normalizeMapName normalizes a map name for comparison with database values
 func (mm *MatchManager) normalizeMapName(rawMapName string) string {
+	// Strip time-of-day suffixes before lookup
+	stripped := rawMapName
+	for _, suffix := range []string{" NIGHT", " DAWN", " DUSK", " DAY", " Night", " Dawn", " Dusk", " Day"} {
+		stripped = strings.TrimSuffix(stripped, suffix)
+	}
+
 	// Create a mapping from RCON map names to internal names
 	rconToInternal := map[string]string{
 		"CARENTAN":           "carentan",
@@ -340,6 +346,7 @@ func (mm *MatchManager) normalizeMapName(rawMapName string) string {
 		"OMAHA BEACH":        "omahabeach",
 		"PURPLE HEART LANE":  "purpleheartlane",
 		"REMAGEN":            "remagen",
+		"SMOLENSK":           "smolensk",
 		"ST MARIE DU MONT":   "stmariedumont",
 		"SAINTE-MÈRE-ÉGLISE": "stmereeglise",
 		"STALINGRAD":         "stalingrad",
@@ -347,13 +354,16 @@ func (mm *MatchManager) normalizeMapName(rawMapName string) string {
 		"UTAH BEACH":         "utahbeach",
 	}
 
-	// Check if we have a direct mapping
+	// Check if we have a direct mapping (try stripped first, then original)
+	if internalName, exists := rconToInternal[stripped]; exists {
+		return internalName
+	}
 	if internalName, exists := rconToInternal[rawMapName]; exists {
 		return internalName
 	}
 
-	// Fallback: try to normalize the name
-	normalized := strings.ToLower(strings.ReplaceAll(rawMapName, " ", ""))
+	// Fallback: strip suffixes, normalize
+	normalized := strings.ToLower(strings.ReplaceAll(stripped, " ", ""))
 	normalized = strings.ReplaceAll(normalized, "ü", "u")
 	normalized = strings.ReplaceAll(normalized, "è", "e")
 	normalized = strings.ReplaceAll(normalized, "é", "e")
