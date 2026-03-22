@@ -1,0 +1,68 @@
+##############################
+#### Global configuration ####
+##############################
+[global]
+log_level = "info"
+log_file = true
+# Set to "hosted" for multi-tenant mode with user signup, JWT auth, and server management via UI
+mode = "hosted"
+
+##############################
+#### Database configuration ####
+##############################
+# For production (Docker): set host to "postgres" (the docker-compose service name)
+# For local development: set host to "localhost"
+# The user/password/dbname must match the postgres environment in docker-compose.yml
+[database]
+host = "postgres"
+port = 5432
+user = "hll_user"
+password = "hll_password"
+dbname = "hll_radar"
+sslmode = "disable"
+
+##############################
+### Player Tracker config ###
+##############################
+[tracker]
+enabled = true
+log_level = "info"
+check_interval_seconds = 5
+
+##############################
+### Web Server configuration ###
+##############################
+[webserver]
+enabled = true
+port = 8080
+log_level = "info"
+# In production, restrict to your frontend domain(s):
+# cors_origins = ["https://radar.example.com"]
+cors_origins = ["*"]
+sp_editor = false
+
+##############################
+### Hosted Mode (Multi-Tenant) ###
+##############################
+# JWT authentication for user accounts
+[hosted]
+# REQUIRED: Set to a secure random string (64+ chars recommended)
+# Generate with: openssl rand -hex 32
+jwt_secret = "change-me-to-a-random-64-char-string"
+# Access token lifetime (short-lived, refreshed automatically)
+jwt_access_ttl_minutes = 15
+# Refresh token lifetime
+jwt_refresh_ttl_days = 30
+# Base URL for invite email links (no trailing slash)
+base_url = "https://radar.example.com"
+
+##############################
+### SMTP (Invite Emails) ###
+##############################
+# Required for sending admin invitations
+[smtp]
+host = "smtp.example.com"
+port = 587
+username = "noreply@example.com"
+password = "smtp-password"
+from = "HLL RADAR <noreply@example.com>"

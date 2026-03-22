@@ -6,8 +6,10 @@ import (
 	"hll-radar/config"
 	"hll-radar/database"
 	"hll-radar/logging"
+	"hll-radar/tenancy"
 	"hll-radar/tracker"
 	"hll-radar/webserver"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -75,7 +77,64 @@ func run() error {
 	}
 	defer db.Close()
 
-	// Get configured servers
+	// Create web server
+	webServerLogger := logging.CreateLogger("webserver")
+	corsOrigins := viper.GetStringSlice("webserver.cors_origins")
+	if len(corsOrigins) == 0 {
+		corsOrigins = []string{"*"}
+	}
+	webServer := webserver.NewWebServer(
+		viper.GetInt("webserver.port"),
+		db,
+		webServerLogger,
+		corsOrigins,
+	)
+
+	// Start config file watching for hot reload
+	config.StartWatching(log)
+	log.Info("Config hot reloading enabled")
+
+	// Start web server in goroutine
+	if viper.GetBool("webserver.enabled") {
+		go func() {
+			if err := webServer.Start(ctx); err != nil {
+				log.Info("Web server stopped", "message", err)
+				cancel()
+			}
+		}()
+		log.Info("Web server started", "address", fmt.Sprintf("http://localhost:%d", viper.GetInt("webserver.port")))
+	}
+
+	if config.IsHostedMode() {
+		log.Info("Running in HOSTED multi-tenant mode")
+		if err := runHostedMode(ctx, db, webServer, log); err != nil {
+			return err
+		}
+	} else {
+		log.Info("Running in STANDALONE mode")
+		if err := runStandaloneMode(ctx, cancel, db, webServer, log); err != nil {
+			return err
+		}
+	}
+
+	log.Info("HLL RADAR started successfully")
+
+	// Wait for shutdown signal
+	<-sigChan
+	log.Info("Shutdown signal received, stopping...")
+
+	// Cancel context to stop all modules
+	cancel()
+
+	// Give modules time to cleanup
+	time.Sleep(2 * time.Second)
+	log.Info("HLL RADAR stopped")
+
+	return nil
+}
+
+// runStandaloneMode sets up servers from config.toml and starts trackers (existing behavior).
+func runStandaloneMode(ctx context.Context, cancel context.CancelFunc, db *database.Database, webServer *webserver.WebServer, log *slog.Logger) error {
 	serverConfigs, err := config.GetServers()
 	if err != nil {
 		return fmt.Errorf("failed to get server configurations: %w", err)
@@ -87,7 +146,6 @@ func run() error {
 		configuredNames[serverCfg.Name] = true
 		server, err := db.GetServerByName(ctx, serverCfg.Name)
 		if err != nil {
-			// Server doesn't exist, create it
 			server = &database.Server{
 				Name:        serverCfg.Name,
 				DisplayName: serverCfg.DisplayName,
@@ -103,7 +161,6 @@ func run() error {
 				log.Info("Registered new server", "name", serverCfg.Name, "display_name", serverCfg.DisplayName)
 			}
 		} else {
-			// Server exists, update it
 			server.DisplayName = serverCfg.DisplayName
 			server.Host = serverCfg.Host
 			server.Port = serverCfg.Port
@@ -118,7 +175,6 @@ func run() error {
 		}
 	}
 
-	// Deactivate servers in DB that are no longer in config
 	allServers, err := db.ListServers(ctx)
 	if err == nil {
 		for _, s := range allServers {
@@ -133,20 +189,6 @@ func run() error {
 		}
 	}
 
-	// Create web server
-	webServerLogger := logging.CreateLogger("webserver")
-	corsOrigins := viper.GetStringSlice("webserver.cors_origins")
-	if len(corsOrigins) == 0 {
-		corsOrigins = []string{"*"}
-	}
-	webServer := webserver.NewWebServer(
-		viper.GetInt("webserver.port"),
-		db,
-		webServerLogger,
-		corsOrigins,
-	)
-
-	// Create RCON clients and player trackers for each enabled server
 	var playerTrackers []*tracker.PlayerTracker
 	var rconClients []*rcon.Rcon
 	rconByServerID := make(map[int64]*rcon.Rcon)
@@ -158,14 +200,12 @@ func run() error {
 			continue
 		}
 
-		// Get server ID from database
 		dbServer, err := db.GetServerByName(ctx, serverCfg.Name)
 		if err != nil {
 			log.Error("Failed to get server from database, skipping", "server", serverCfg.Name, "error", err)
 			continue
 		}
 
-		// Create RCON client
 		rconCfg := rcon.ServerConfig{
 			Host:     serverCfg.Host,
 			Port:     fmt.Sprintf("%d", serverCfg.Port),
@@ -180,7 +220,6 @@ func run() error {
 		rconClients = append(rconClients, rconClient)
 		rconByServerID[dbServer.ID] = rconClient
 
-		// Create player tracker for this server
 		trackerLogger := logging.CreateLogger(fmt.Sprintf("tracker-%s", serverCfg.Name))
 		playerTracker := tracker.NewPlayerTracker(
 			viper.GetBool("tracker.enabled"),
@@ -188,7 +227,7 @@ func run() error {
 			rconClient,
 			db,
 			webServer,
-			dbServer.ID, // Pass server ID to tracker
+			dbServer.ID,
 		)
 		playerTrackers = append(playerTrackers, playerTracker)
 		trackerByServerID[dbServer.ID] = playerTracker
@@ -196,18 +235,14 @@ func run() error {
 		log.Info("Initialized server", "name", serverCfg.Name, "host", serverCfg.Host, "port", serverCfg.Port)
 	}
 
-	// Ensure we have at least one server
 	if len(playerTrackers) == 0 {
 		return fmt.Errorf("no enabled servers configured")
 	}
 
-	// isRCONEmptyResponseError checks if the error is just the RCON library
-	// failing to parse an empty response (command succeeded but response was empty)
 	isRCONEmptyResponseError := func(err error) bool {
 		return err != nil && err.Error() == "unexpected end of JSON input"
 	}
 
-	// resolvePlayerID looks up a player's steam ID by their display name
 	resolvePlayerID := func(rc *rcon.Rcon, playerName string) (string, error) {
 		players, err := rc.GetPlayers()
 		if err != nil {
@@ -221,7 +256,6 @@ func run() error {
 		return "", fmt.Errorf("player %q not found on server", playerName)
 	}
 
-	// Wire up RCON message function so the web server can send in-game messages
 	webServer.SetMessagePlayerFunc(func(serverID int64, playerName string, message string) error {
 		rc, ok := rconByServerID[serverID]
 		if !ok {
@@ -238,7 +272,6 @@ func run() error {
 		return err
 	})
 
-	// Wire up RCON punish function
 	webServer.SetPunishPlayerFunc(func(serverID int64, playerName string, reason string) error {
 		rc, ok := rconByServerID[serverID]
 		if !ok {
@@ -255,7 +288,6 @@ func run() error {
 		return err
 	})
 
-	// Wire up RCON kick function
 	webServer.SetKickPlayerFunc(func(serverID int64, playerName string, reason string) error {
 		rc, ok := rconByServerID[serverID]
 		if !ok {
@@ -272,7 +304,6 @@ func run() error {
 		return err
 	})
 
-	// Wire up live spawns function
 	webServer.SetGetLiveSpawnsFunc(func(serverID int64) []webserver.SpawnPoint {
 		pt, ok := trackerByServerID[serverID]
 		if !ok {
@@ -295,51 +326,63 @@ func run() error {
 		return result
 	})
 
-	// Cleanup RCON clients on shutdown
-	defer func() {
+	// Cleanup RCON clients on shutdown (deferred in caller via context)
+	go func() {
+		<-ctx.Done()
 		for _, client := range rconClients {
 			client.Close()
 		}
 	}()
 
-	// Start config file watching for hot reload
-	config.StartWatching(log)
-	log.Info("Config hot reloading enabled")
-
-	// Start web server in goroutine
-	if viper.GetBool("webserver.enabled") {
-		go func() {
-			if err := webServer.Start(ctx); err != nil {
-				log.Info("Web server stopped", "message", err)
-				cancel()
-			}
-		}()
-		log.Info("Web server started", "address", fmt.Sprintf("http://localhost:%d", viper.GetInt("webserver.port")))
-	}
-
-	// Start all player trackers in goroutines (events are handled automatically by RCON)
 	for _, pt := range playerTrackers {
-		tracker := pt // Capture loop variable
+		t := pt
 		go func() {
-			if err := tracker.Start(ctx); err != nil {
+			if err := t.Start(ctx); err != nil {
 				log.Info("Player tracker stopped", "message", err)
 				cancel()
 			}
 		}()
 	}
 
-	log.Info("HLL RADAR started successfully")
+	return nil
+}
 
-	// Wait for shutdown signal
-	<-sigChan
-	log.Info("Shutdown signal received, stopping...")
+// runHostedMode uses TrackerManager for dynamic server lifecycle (multi-tenant).
+func runHostedMode(ctx context.Context, db *database.Database, webServer *webserver.WebServer, log *slog.Logger) error {
+	trackerMgr := tenancy.NewTrackerManager(ctx, db, webServer, log)
 
-	// Cancel context to stop all modules
-	cancel()
+	// Start trackers for all active servers in DB
+	servers, err := db.ListServers(ctx)
+	if err != nil {
+		log.Warn("Failed to list servers for startup", "error", err)
+	} else {
+		for _, s := range servers {
+			if err := trackerMgr.StartServer(s.ID); err != nil {
+				log.Error("Failed to start tracker", "server", s.Name, "error", err)
+			}
+		}
+	}
 
-	// Give modules time to cleanup
-	time.Sleep(2 * time.Second)
-	log.Info("HLL RADAR stopped")
+	// Wire callbacks through TrackerManager
+	webServer.SetTrackerManager(trackerMgr)
+	webServer.SetMessagePlayerFunc(func(serverID int64, playerName, message string) error {
+		return trackerMgr.MessagePlayer(serverID, playerName, message)
+	})
+	webServer.SetPunishPlayerFunc(func(serverID int64, playerName, reason string) error {
+		return trackerMgr.PunishPlayer(serverID, playerName, reason)
+	})
+	webServer.SetKickPlayerFunc(func(serverID int64, playerName, reason string) error {
+		return trackerMgr.KickPlayer(serverID, playerName, reason)
+	})
+	webServer.SetGetLiveSpawnsFunc(func(serverID int64) []webserver.SpawnPoint {
+		return trackerMgr.GetLiveSpawns(serverID)
+	})
+
+	// Cleanup on shutdown
+	go func() {
+		<-ctx.Done()
+		trackerMgr.StopAll()
+	}()
 
 	return nil
 }

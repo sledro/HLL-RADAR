@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hll-radar/auth"
+	"hll-radar/config"
 	"hll-radar/database"
 	"math"
 	"net/http"
@@ -46,17 +48,29 @@ func parseKillEvent(event database.MatchEvent) KillEventResponse {
 // handleAuthStatus reports whether auth is required and whether the current session is valid.
 // This endpoint is whitelisted from the auth middleware so the frontend can check before rendering.
 func (ws *WebServer) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
-	authRequired := viper.GetBool("crcon.enabled")
+	mode := config.GetMode()
 
+	if config.IsHostedMode() {
+		// In hosted mode, check JWT from context (set by middleware, which whitelists this path)
+		_, authenticated := auth.UserIDFromContext(r.Context())
+		writeJSON(w, http.StatusOK, map[string]any{
+			"mode":          mode,
+			"auth_required": true,
+			"authenticated": authenticated,
+			"auth_type":     "jwt",
+		})
+		return
+	}
+
+	// Standalone mode: check CRCON session
+	authRequired := viper.GetBool("crcon.enabled")
 	authenticated := false
 	if authRequired {
 		cookie, err := r.Cookie("sessionid")
 		if err == nil && cookie.Value != "" {
-			// Check cache first
 			if valid, found := authCache.get(cookie.Value); found {
 				authenticated = valid
 			} else {
-				// Validate with CRCON
 				crconURL := viper.GetString("crcon.url")
 				ttl := time.Duration(viper.GetInt("crcon.cache_ttl_seconds")) * time.Second
 				if ttl == 0 {
@@ -71,9 +85,11 @@ func (ws *WebServer) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]bool{
+	writeJSON(w, http.StatusOK, map[string]any{
+		"mode":          mode,
 		"auth_required": authRequired,
 		"authenticated": authenticated,
+		"auth_type":     "crcon",
 	})
 }
 
@@ -357,7 +373,20 @@ func (ws *WebServer) handleServers(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	servers, err := ws.db.ListServers(ctx)
+	var servers []database.Server
+	var err error
+
+	if config.IsHostedMode() {
+		orgID, ok := auth.OrgIDFromContext(r.Context())
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "Authentication required"})
+			return
+		}
+		servers, err = ws.db.ListServersByOrg(ctx, orgID)
+	} else {
+		servers, err = ws.db.ListServers(ctx)
+	}
+
 	if err != nil {
 		ws.log.Error("Failed to get servers", "error", err)
 		http.Error(w, "Failed to get servers", http.StatusInternalServerError)

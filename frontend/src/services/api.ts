@@ -6,6 +6,11 @@ import type {
   MatchEvent,
   KillEvent,
   SpawnEvent,
+  AuthStatus,
+  AuthResponse,
+  Organization,
+  OrgMember,
+  InviteResponse,
 } from "../types";
 
 const API_BASE_URL =
@@ -58,22 +63,54 @@ class ApiClient {
     this.baseUrl = baseUrl;
   }
 
+  static getToken(): string | null {
+    return localStorage.getItem("access_token");
+  }
+
   private async request<T>(
     endpoint: string,
     options?: RequestInit
   ): Promise<T> {
     const url = `${this.baseUrl}${endpoint}`;
 
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      ...(options?.headers as Record<string, string>),
+    };
+
+    const token = ApiClient.getToken();
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+
     const response = await fetch(url, {
       credentials: "include",
-      headers: {
-        "Content-Type": "application/json",
-        ...options?.headers,
-      },
+      headers,
       ...options,
     });
 
     if (response.status === 401) {
+      // In hosted mode, try to refresh the token before giving up
+      const refreshToken = localStorage.getItem("refresh_token");
+      if (refreshToken) {
+        try {
+          const refreshed = await this.refreshAccessToken(refreshToken);
+          localStorage.setItem("access_token", refreshed.access_token);
+          localStorage.setItem("refresh_token", refreshed.refresh_token);
+          // Retry the original request with new token
+          headers["Authorization"] = `Bearer ${refreshed.access_token}`;
+          const retryResponse = await fetch(url, {
+            credentials: "include",
+            headers,
+            ...options,
+          });
+          if (retryResponse.ok) {
+            return retryResponse.json();
+          }
+        } catch {
+          // Refresh failed, fall through to auth-expired
+        }
+      }
       window.dispatchEvent(new CustomEvent("hll-radar-auth-expired"));
       throw new AuthenticationError("Authentication required");
     }
@@ -263,25 +300,175 @@ class ApiClient {
   }
 
   // Check auth status (whitelisted endpoint — never returns 401)
-  async getAuthStatus(): Promise<{
-    auth_required: boolean;
-    authenticated: boolean;
-  }> {
+  async getAuthStatus(): Promise<AuthStatus> {
     const url = `${this.baseUrl}/api/v1/auth/status`;
-    const response = await fetch(url, { credentials: "include" });
+    const headers: Record<string, string> = {};
+    const token = ApiClient.getToken();
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+    const response = await fetch(url, { credentials: "include", headers });
     return response.json();
   }
 
   // Get WebSocket URL
   getWebSocketUrl(): string {
+    let wsUrl: string;
     // When baseUrl is empty (same-origin), derive from window.location
     if (!this.baseUrl) {
       const wsProtocol = window.location.protocol === "https:" ? "wss" : "ws";
-      return `${wsProtocol}://${window.location.host}/ws`;
+      wsUrl = `${wsProtocol}://${window.location.host}/ws`;
+    } else {
+      const wsProtocol = this.baseUrl.startsWith("https") ? "wss" : "ws";
+      const wsBaseUrl = this.baseUrl.replace(/^https?/, wsProtocol);
+      wsUrl = `${wsBaseUrl}/ws`;
     }
-    const wsProtocol = this.baseUrl.startsWith("https") ? "wss" : "ws";
-    const wsBaseUrl = this.baseUrl.replace(/^https?/, wsProtocol);
-    return `${wsBaseUrl}/ws`;
+    // In hosted mode, append token as query param for WebSocket auth
+    const token = ApiClient.getToken();
+    if (token) {
+      wsUrl += `?token=${token}`;
+    }
+    return wsUrl;
+  }
+
+  // --- Multi-tenancy / Hosted mode endpoints ---
+
+  async signup(
+    email: string,
+    password: string,
+    displayName: string,
+    orgName: string
+  ): Promise<AuthResponse> {
+    const url = `${this.baseUrl}/api/v1/auth/signup`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email,
+        password,
+        display_name: displayName,
+        org_name: orgName,
+      }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.error || `Signup failed: ${response.status}`);
+    }
+    return response.json();
+  }
+
+  async login(email: string, password: string): Promise<AuthResponse> {
+    const url = `${this.baseUrl}/api/v1/auth/login`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.error || `Login failed: ${response.status}`);
+    }
+    return response.json();
+  }
+
+  async refreshAccessToken(
+    refreshToken: string
+  ): Promise<{ access_token: string; refresh_token: string }> {
+    const url = `${this.baseUrl}/api/v1/auth/refresh`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    });
+    if (!response.ok) {
+      throw new Error("Token refresh failed");
+    }
+    return response.json();
+  }
+
+  async getOrg(): Promise<Organization> {
+    return this.request<Organization>("/api/v1/org");
+  }
+
+  async getOrgMembers(): Promise<OrgMember[]> {
+    return this.request<OrgMember[]>("/api/v1/org/members");
+  }
+
+  async inviteAdmin(email: string): Promise<InviteResponse> {
+    return this.request<InviteResponse>("/api/v1/org/invite", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    });
+  }
+
+  async removeMember(userId: number): Promise<void> {
+    await this.request(`/api/v1/org/members/${userId}`, {
+      method: "DELETE",
+    });
+  }
+
+  async acceptInvite(
+    inviteToken: string,
+    password: string,
+    displayName: string
+  ): Promise<AuthResponse> {
+    const url = `${this.baseUrl}/api/v1/auth/accept-invite`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        token: inviteToken,
+        password,
+        display_name: displayName,
+      }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.error || `Accept invite failed: ${response.status}`);
+    }
+    return response.json();
+  }
+
+  async createServer(data: {
+    name: string;
+    display_name: string;
+    host: string;
+    port: number;
+    password: string;
+  }): Promise<Server> {
+    return this.request<Server>("/api/v1/servers", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async testServer(serverId: number): Promise<{ status: string }> {
+    return this.request<{ status: string }>(
+      `/api/v1/servers/${serverId}/test`,
+      { method: "POST" }
+    );
+  }
+
+  async updateServer(
+    serverId: number,
+    data: Partial<{
+      name: string;
+      display_name: string;
+      host: string;
+      port: number;
+      password: string;
+    }>
+  ): Promise<Server> {
+    return this.request<Server>(`/api/v1/servers/${serverId}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteServer(serverId: number): Promise<void> {
+    await this.request(`/api/v1/servers/${serverId}`, {
+      method: "DELETE",
+    });
   }
 }
 
