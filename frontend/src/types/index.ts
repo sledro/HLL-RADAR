@@ -270,6 +270,6 @@ export interface OrgMember {
 export interface InviteResponse {
   id: number;
   email: string;
-  invite_url: string;
+  invite_url?: string;
   expires_at: string;
 }

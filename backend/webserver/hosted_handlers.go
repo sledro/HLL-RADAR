@@ -393,6 +393,12 @@ func (ws *WebServer) handleInviteAdmin(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
+	// Check if email is already registered
+	if _, err := ws.db.GetUserByEmail(ctx, req.Email); err == nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "This email is already tied to another organization. Each email can only belong to one organization."})
+		return
+	}
+
 	// Generate invite token
 	inviteToken, err := auth.GenerateInviteToken()
 	if err != nil {
@@ -402,11 +408,14 @@ func (ws *WebServer) handleInviteAdmin(w http.ResponseWriter, r *http.Request) {
 
 	expiresAt := time.Now().Add(7 * 24 * time.Hour) // 7 days
 
+	// Delete any existing invitation for this email (allows re-inviting)
+	ws.db.DeleteInvitationByOrgAndEmail(ctx, orgID, req.Email)
+
 	// Store hashed token in DB, send raw token in invite link
 	inv, err := ws.db.CreateInvitation(ctx, orgID, req.Email, auth.HashToken(inviteToken), userID, expiresAt)
 	if err != nil {
 		ws.log.Error("Failed to create invitation", "error", err)
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "An invitation for this email already exists"})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to create invitation"})
 		return
 	}
 
@@ -437,13 +446,15 @@ func (ws *WebServer) handleInviteAdmin(w http.ResponseWriter, r *http.Request) {
 
 	if err := emailpkg.SendInviteEmail(emailCfg, req.Email, inviteURL, orgName, inviterName); err != nil {
 		ws.log.Error("Failed to send invite email", "error", err, "to", req.Email)
-		// Still return success since the invitation was created - they can get the link manually
+		// Delete the invitation since the email couldn't be sent
+		ws.db.DeleteInvitationByOrgAndEmail(ctx, orgID, req.Email)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to send invite email. Check SMTP configuration."})
+		return
 	}
 
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id":         inv.ID,
 		"email":      req.Email,
-		"invite_url": inviteURL,
 		"expires_at": expiresAt,
 	})
 }

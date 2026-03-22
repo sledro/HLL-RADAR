@@ -216,7 +216,7 @@ export function OrgSettingsPage() {
     setInviteResult("");
     try {
       const result = await apiClient.inviteAdmin(inviteEmail);
-      setInviteResult(`Invite sent! URL: ${result.invite_url}`);
+      setInviteResult(`Invite sent to ${result.email}`);
       setInviteEmail("");
       setShowInviteForm(false);
     } catch (err) {

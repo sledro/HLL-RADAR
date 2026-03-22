@@ -1717,6 +1717,14 @@ func (d *Database) AcceptInvitation(ctx context.Context, invitationID int64) err
 	return nil
 }
 
+func (d *Database) DeleteInvitationByOrgAndEmail(ctx context.Context, orgID int64, email string) error {
+	_, err := d.pool.Exec(ctx, `DELETE FROM org_invitations WHERE org_id = $1 AND email = $2`, orgID, email)
+	if err != nil {
+		return fmt.Errorf("failed to delete invitation: %w", err)
+	}
+	return nil
+}
+
 func (d *Database) GetPendingInvitations(ctx context.Context, orgID int64) ([]OrgInvitation, error) {
 	query := `SELECT id, org_id, email, invite_token, invited_by, expires_at, accepted_at, created_at
 			  FROM org_invitations WHERE org_id = $1 AND accepted_at IS NULL AND expires_at > NOW()
