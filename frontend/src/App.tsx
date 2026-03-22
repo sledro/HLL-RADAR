@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { BrowserRouter, Routes, Route, useNavigate } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, useNavigate } from "react-router-dom";
 import { ConnectionStatus } from "./components/ConnectionStatus";
 import { MatchList } from "./components/MatchList";
 import { apiClient } from "./services/api";
@@ -25,7 +25,7 @@ import "./App.css";
 
 // ─── Shared dashboard content (used by both standalone and hosted) ───────────
 
-function DashboardContent({ hostedMode }: { hostedMode?: boolean }) {
+function DashboardContent({ hostedMode, isOwner }: { hostedMode?: boolean; isOwner?: boolean }) {
   const [authState, setAuthState] = useState<"checking" | "ok" | "required">(
     hostedMode ? "ok" : "checking"
   );
@@ -309,7 +309,7 @@ function DashboardContent({ hostedMode }: { hostedMode?: boolean }) {
               SP Editor
             </button>
           )}
-          {hostedMode && <SettingsLink />}
+          {hostedMode && isOwner && <SettingsLink />}
           {!serversLoading && servers.length > 0 && (
             <div className="server-selector-container">
               <select
@@ -410,6 +410,19 @@ function DashboardContent({ hostedMode }: { hostedMode?: boolean }) {
   );
 }
 
+function OwnerRoute({ children }: { children: React.ReactNode }) {
+  const auth = useAuth();
+  if (!auth.isOwner) {
+    return <Navigate to="/" replace />;
+  }
+  return <>{children}</>;
+}
+
+function HostedDashboard() {
+  const auth = useAuth();
+  return <DashboardContent hostedMode={true} isOwner={auth.isOwner} />;
+}
+
 // ─── Small hosted-mode header components ─────────────────────────────────────
 
 function SettingsLink() {
@@ -460,7 +473,9 @@ function HostedApp() {
             path="/settings"
             element={
               <ProtectedRoute>
-                <OrgSettingsPage />
+                <OwnerRoute>
+                  <OrgSettingsPage />
+                </OwnerRoute>
               </ProtectedRoute>
             }
           />
@@ -468,7 +483,7 @@ function HostedApp() {
             path="/"
             element={
               <ProtectedRoute>
-                <DashboardContent hostedMode={true} />
+                <HostedDashboard />
               </ProtectedRoute>
             }
           />

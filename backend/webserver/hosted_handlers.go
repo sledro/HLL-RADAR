@@ -591,6 +591,25 @@ func (ws *WebServer) handleAcceptInvite(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+func (ws *WebServer) handleAllServers(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := auth.OrgIDFromContext(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "Authentication required"})
+		return
+	}
+
+	servers, err := ws.db.ListAllServersByOrg(r.Context(), orgID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to get servers"})
+		return
+	}
+	if servers == nil {
+		servers = []database.Server{}
+	}
+
+	writeJSON(w, http.StatusOK, servers)
+}
+
 // ==================== Server CRUD Handlers ====================
 
 func (ws *WebServer) handleCreateServer(w http.ResponseWriter, r *http.Request) {

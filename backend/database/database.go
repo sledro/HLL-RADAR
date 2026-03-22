@@ -1823,6 +1823,30 @@ func (d *Database) ListServersByOrg(ctx context.Context, orgID int64) ([]Server,
 	return servers, nil
 }
 
+func (d *Database) ListAllServersByOrg(ctx context.Context, orgID int64) ([]Server, error) {
+	query := `SELECT id, name, display_name, host, port, password, is_active, org_id, created_at
+			  FROM servers WHERE org_id = $1 ORDER BY id ASC`
+	rows, err := d.pool.Query(ctx, query, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list all servers by org: %w", err)
+	}
+	defer rows.Close()
+
+	var servers []Server
+	for rows.Next() {
+		var server Server
+		if err := rows.Scan(
+			&server.ID, &server.Name, &server.DisplayName, &server.Host,
+			&server.Port, &server.Password, &server.IsActive, &server.OrgID, &server.CreatedAt,
+		); err != nil {
+			d.log.Error("Failed to scan server", "error", err)
+			continue
+		}
+		servers = append(servers, server)
+	}
+	return servers, nil
+}
+
 func (d *Database) GetServerByIDAndOrg(ctx context.Context, serverID, orgID int64) (*Server, error) {
 	query := `SELECT id, name, display_name, host, port, password, is_active, org_id, created_at
 			  FROM servers WHERE id = $1 AND org_id = $2`

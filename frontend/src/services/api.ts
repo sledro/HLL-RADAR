@@ -473,6 +473,10 @@ class ApiClient {
     });
   }
 
+  async getAllServers(): Promise<Server[]> {
+    return this.request<Server[]>("/api/v1/servers/all");
+  }
+
   async toggleServer(serverId: number): Promise<{ status: string; is_active: boolean }> {
     return this.request(`/api/v1/servers/${serverId}/toggle`, {
       method: "POST",

@@ -170,6 +170,7 @@ func NewWebServer(port int, db *database.Database, logger *slog.Logger, corsOrig
 		router.HandleFunc("/api/v1/servers/{id}", requireOwner(ws.handleUpdateServer)).Methods("PUT", "OPTIONS")
 		router.HandleFunc("/api/v1/servers/{id}", requireOwner(ws.handleDeleteServer)).Methods("DELETE", "OPTIONS")
 		router.HandleFunc("/api/v1/servers/{id}/toggle", requireOwner(ws.handleToggleServer)).Methods("POST", "OPTIONS")
+		router.HandleFunc("/api/v1/servers/all", ws.handleAllServers).Methods("GET", "OPTIONS")
 
 		logger.Info("Hosted mode API endpoints registered")
 	}

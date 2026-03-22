@@ -153,7 +153,7 @@ export function OrgSettingsPage() {
 
   const loadServers = async () => {
     try {
-      const s = await apiClient.getServers();
+      const s = await apiClient.getAllServers();
       setServers(s || []);
     } catch {
       setServerError("Failed to load servers");
