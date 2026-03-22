@@ -110,6 +110,9 @@ export function SignupPage() {
     <div style={styles.container}>
       <div style={styles.card}>
         <h1 style={styles.title}>HLL RADAR - Sign Up</h1>
+        <div style={{ background: "#1a2744", border: "1px solid #2a3a5c", borderRadius: "4px", padding: "0.75rem", marginBottom: "1rem", fontSize: "0.8rem", color: "#8899bb", lineHeight: "1.4" }}>
+          This creates a new organization and makes you the owner. If your server admin has already set up HLL RADAR, ask them for an invite link instead.
+        </div>
         {error && <div style={styles.error}>{error}</div>}
         <form onSubmit={handleSubmit}>
           <div style={styles.field}>
