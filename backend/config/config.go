@@ -172,10 +172,15 @@ func IsHostedMode() bool {
 	return GetMode() == "hosted"
 }
 
-// GetHostedConfig returns the hosted mode configuration
+// GetHostedConfig returns the hosted mode configuration.
+// Uses viper.Get* instead of UnmarshalKey so env var overrides work.
 func GetHostedConfig() HostedConfig {
-	var cfg HostedConfig
-	viper.UnmarshalKey("hosted", &cfg)
+	cfg := HostedConfig{
+		JWTSecret:           viper.GetString("hosted.jwt_secret"),
+		JWTAccessTTLMinutes: viper.GetInt("hosted.jwt_access_ttl_minutes"),
+		JWTRefreshTTLDays:   viper.GetInt("hosted.jwt_refresh_ttl_days"),
+		BaseURL:             viper.GetString("hosted.base_url"),
+	}
 	if cfg.JWTAccessTTLMinutes == 0 {
 		cfg.JWTAccessTTLMinutes = 15
 	}
@@ -185,11 +190,16 @@ func GetHostedConfig() HostedConfig {
 	return cfg
 }
 
-// GetSMTPConfig returns the SMTP configuration
+// GetSMTPConfig returns the SMTP configuration.
+// Uses viper.Get* instead of UnmarshalKey so env var overrides work.
 func GetSMTPConfig() SMTPConfig {
-	var cfg SMTPConfig
-	viper.UnmarshalKey("smtp", &cfg)
-	return cfg
+	return SMTPConfig{
+		Host:     viper.GetString("smtp.host"),
+		Port:     viper.GetInt("smtp.port"),
+		Username: viper.GetString("smtp.username"),
+		Password: viper.GetString("smtp.password"),
+		From:     viper.GetString("smtp.from"),
+	}
 }
 
 // ServerConfig represents a single RCON server configuration
