@@ -51,8 +51,16 @@ func (ws *WebServer) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 	mode := config.GetMode()
 
 	if config.IsHostedMode() {
-		// In hosted mode, check JWT from context (set by middleware, which whitelists this path)
-		_, authenticated := auth.UserIDFromContext(r.Context())
+		// This endpoint is whitelisted from JWT middleware, so we validate the token manually
+		authenticated := false
+		authHeader := r.Header.Get("Authorization")
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+			hostedCfg := config.GetHostedConfig()
+			if _, err := auth.ValidateToken(tokenStr, hostedCfg.JWTSecret); err == nil {
+				authenticated = true
+			}
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"mode":          mode,
 			"auth_required": true,
