@@ -34,6 +34,10 @@ Thumbs.db
 # Documentation
 CLAUDE.md
 
+# Config files (Railway uses env vars; standalone mounts config.toml via docker-compose)
+config.toml
+config.*.toml
+
 # Node modules (will be installed fresh inside Docker)
 frontend/node_modules/
 frontend/dist/
