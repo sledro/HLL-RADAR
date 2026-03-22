@@ -8,6 +8,8 @@ import (
 	"hll-radar/database"
 	emailpkg "hll-radar/email"
 	"net/http"
+	"net/mail"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -17,6 +19,38 @@ import (
 )
 
 var slugRegex = regexp.MustCompile(`[^a-z0-9]+`)
+
+// verifyTurnstile validates a Cloudflare Turnstile token. Returns nil if
+// Turnstile is not configured (disabled) or if the token is valid.
+func verifyTurnstile(token, remoteIP string) error {
+	cfg := config.GetTurnstileConfig()
+	if cfg.SecretKey == "" {
+		return nil // Turnstile not configured, skip
+	}
+	if token == "" {
+		return fmt.Errorf("captcha verification required")
+	}
+
+	resp, err := http.PostForm("https://challenges.cloudflare.com/turnstile/v0/siteverify",
+		url.Values{
+			"secret":   {cfg.SecretKey},
+			"response": {token},
+			"remoteip": {remoteIP},
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("captcha verification failed")
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Success bool `json:"success"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || !result.Success {
+		return fmt.Errorf("captcha verification failed")
+	}
+	return nil
+}
 
 func generateSlug(name string) string {
 	slug := strings.ToLower(strings.TrimSpace(name))
@@ -32,13 +66,19 @@ func generateSlug(name string) string {
 
 func (ws *WebServer) handleSignup(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Email       string `json:"email"`
-		Password    string `json:"password"`
-		DisplayName string `json:"display_name"`
-		OrgName     string `json:"org_name"`
+		Email          string `json:"email"`
+		Password       string `json:"password"`
+		DisplayName    string `json:"display_name"`
+		OrgName        string `json:"org_name"`
+		TurnstileToken string `json:"turnstile_token"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid request body"})
+		return
+	}
+
+	if err := verifyTurnstile(req.TurnstileToken, auth.ClientIP(r)); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 
@@ -46,8 +86,20 @@ func (ws *WebServer) handleSignup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "All fields are required"})
 		return
 	}
+	if _, err := mail.ParseAddress(req.Email); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid email address"})
+		return
+	}
+	if len(req.Email) > 254 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Email address too long"})
+		return
+	}
 	if len(req.Password) < 8 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Password must be at least 8 characters"})
+		return
+	}
+	if len(req.Password) > 128 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Password must be at most 128 characters"})
 		return
 	}
 
@@ -96,16 +148,17 @@ func (ws *WebServer) handleSignup(w http.ResponseWriter, r *http.Request) {
 	hostedCfg := config.GetHostedConfig()
 	accessTTL := time.Duration(hostedCfg.JWTAccessTTLMinutes) * time.Minute
 	refreshTTL := time.Duration(hostedCfg.JWTRefreshTTLDays) * 24 * time.Hour
+	fingerprint := auth.RequestFingerprint(r)
 
-	accessToken, refreshToken, err := auth.CreateTokenPair(user.ID, org.ID, user.Role, hostedCfg.JWTSecret, accessTTL, refreshTTL)
+	accessToken, refreshToken, err := auth.CreateTokenPair(user.ID, org.ID, user.Role, hostedCfg.JWTSecret, fingerprint, accessTTL, refreshTTL)
 	if err != nil {
 		ws.log.Error("Failed to create tokens", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to create tokens"})
 		return
 	}
 
-	// Store refresh token hash
-	if err := ws.db.CreateRefreshToken(ctx, user.ID, auth.HashToken(refreshToken), time.Now().Add(refreshTTL)); err != nil {
+	// Store refresh token hash with device fingerprint
+	if err := ws.db.CreateRefreshToken(ctx, user.ID, auth.HashToken(refreshToken), fingerprint, time.Now().Add(refreshTTL)); err != nil {
 		ws.log.Error("Failed to store refresh token", "error", err)
 	}
 
@@ -130,11 +183,17 @@ func (ws *WebServer) handleSignup(w http.ResponseWriter, r *http.Request) {
 
 func (ws *WebServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
+		Email          string `json:"email"`
+		Password       string `json:"password"`
+		TurnstileToken string `json:"turnstile_token"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid request body"})
+		return
+	}
+
+	if err := verifyTurnstile(req.TurnstileToken, auth.ClientIP(r)); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 
@@ -158,15 +217,16 @@ func (ws *WebServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 	hostedCfg := config.GetHostedConfig()
 	accessTTL := time.Duration(hostedCfg.JWTAccessTTLMinutes) * time.Minute
 	refreshTTL := time.Duration(hostedCfg.JWTRefreshTTLDays) * 24 * time.Hour
+	fingerprint := auth.RequestFingerprint(r)
 
-	accessToken, refreshToken, err := auth.CreateTokenPair(user.ID, user.OrgID, user.Role, hostedCfg.JWTSecret, accessTTL, refreshTTL)
+	accessToken, refreshToken, err := auth.CreateTokenPair(user.ID, user.OrgID, user.Role, hostedCfg.JWTSecret, fingerprint, accessTTL, refreshTTL)
 	if err != nil {
 		ws.log.Error("Failed to create tokens", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to create tokens"})
 		return
 	}
 
-	if err := ws.db.CreateRefreshToken(ctx, user.ID, auth.HashToken(refreshToken), time.Now().Add(refreshTTL)); err != nil {
+	if err := ws.db.CreateRefreshToken(ctx, user.ID, auth.HashToken(refreshToken), fingerprint, time.Now().Add(refreshTTL)); err != nil {
 		ws.log.Error("Failed to store refresh token", "error", err)
 	}
 
@@ -213,6 +273,15 @@ func (ws *WebServer) handleRefreshToken(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Verify device fingerprint matches
+	fingerprint := auth.RequestFingerprint(r)
+	if rt.Fingerprint != "" && rt.Fingerprint != fingerprint {
+		ws.log.Warn("Refresh token used from different device", "user_id", rt.UserID)
+		ws.db.DeleteRefreshToken(ctx, tokenHash)
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "Token used from unrecognized device"})
+		return
+	}
+
 	user, err := ws.db.GetUserByID(ctx, rt.UserID)
 	if err != nil || !user.IsActive {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "User not found or inactive"})
@@ -226,18 +295,31 @@ func (ws *WebServer) handleRefreshToken(w http.ResponseWriter, r *http.Request) 
 	accessTTL := time.Duration(hostedCfg.JWTAccessTTLMinutes) * time.Minute
 	refreshTTL := time.Duration(hostedCfg.JWTRefreshTTLDays) * 24 * time.Hour
 
-	accessToken, newRefreshToken, err := auth.CreateTokenPair(user.ID, user.OrgID, user.Role, hostedCfg.JWTSecret, accessTTL, refreshTTL)
+	accessToken, newRefreshToken, err := auth.CreateTokenPair(user.ID, user.OrgID, user.Role, hostedCfg.JWTSecret, fingerprint, accessTTL, refreshTTL)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to create tokens"})
 		return
 	}
 
-	ws.db.CreateRefreshToken(ctx, user.ID, auth.HashToken(newRefreshToken), time.Now().Add(refreshTTL))
+	ws.db.CreateRefreshToken(ctx, user.ID, auth.HashToken(newRefreshToken), fingerprint, time.Now().Add(refreshTTL))
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"access_token":  accessToken,
 		"refresh_token": newRefreshToken,
 	})
+}
+
+func (ws *WebServer) handleLogout(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserIDFromContext(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "Authentication required"})
+		return
+	}
+
+	// Revoke all refresh tokens for this user
+	ws.db.DeleteUserRefreshTokens(r.Context(), userID)
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "logged out"})
 }
 
 // ==================== Org Handlers ====================
@@ -316,7 +398,8 @@ func (ws *WebServer) handleInviteAdmin(w http.ResponseWriter, r *http.Request) {
 
 	expiresAt := time.Now().Add(7 * 24 * time.Hour) // 7 days
 
-	inv, err := ws.db.CreateInvitation(ctx, orgID, req.Email, inviteToken, userID, expiresAt)
+	// Store hashed token in DB, send raw token in invite link
+	inv, err := ws.db.CreateInvitation(ctx, orgID, req.Email, auth.HashToken(inviteToken), userID, expiresAt)
 	if err != nil {
 		ws.log.Error("Failed to create invitation", "error", err)
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "An invitation for this email already exists"})
@@ -419,7 +502,7 @@ func (ws *WebServer) handleAcceptInvite(w http.ResponseWriter, r *http.Request) 
 
 	ctx := r.Context()
 
-	inv, err := ws.db.GetInvitationByToken(ctx, req.InviteToken)
+	inv, err := ws.db.GetInvitationByToken(ctx, auth.HashToken(req.InviteToken))
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "Invalid invitation"})
 		return
@@ -460,14 +543,15 @@ func (ws *WebServer) handleAcceptInvite(w http.ResponseWriter, r *http.Request) 
 	hostedCfg := config.GetHostedConfig()
 	accessTTL := time.Duration(hostedCfg.JWTAccessTTLMinutes) * time.Minute
 	refreshTTL := time.Duration(hostedCfg.JWTRefreshTTLDays) * 24 * time.Hour
+	fingerprint := auth.RequestFingerprint(r)
 
-	accessToken, refreshToken, err := auth.CreateTokenPair(user.ID, inv.OrgID, user.Role, hostedCfg.JWTSecret, accessTTL, refreshTTL)
+	accessToken, refreshToken, err := auth.CreateTokenPair(user.ID, inv.OrgID, user.Role, hostedCfg.JWTSecret, fingerprint, accessTTL, refreshTTL)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to create tokens"})
 		return
 	}
 
-	ws.db.CreateRefreshToken(ctx, user.ID, auth.HashToken(refreshToken), time.Now().Add(refreshTTL))
+	ws.db.CreateRefreshToken(ctx, user.ID, auth.HashToken(refreshToken), fingerprint, time.Now().Add(refreshTTL))
 
 	org, _ := ws.db.GetOrganizationByID(ctx, inv.OrgID)
 

@@ -337,7 +337,8 @@ class ApiClient {
     email: string,
     password: string,
     displayName: string,
-    orgName: string
+    orgName: string,
+    turnstileToken?: string
   ): Promise<AuthResponse> {
     const url = `${this.baseUrl}/api/v1/auth/signup`;
     const response = await fetch(url, {
@@ -348,6 +349,7 @@ class ApiClient {
         password,
         display_name: displayName,
         org_name: orgName,
+        turnstile_token: turnstileToken,
       }),
     });
     if (!response.ok) {
@@ -357,12 +359,12 @@ class ApiClient {
     return response.json();
   }
 
-  async login(email: string, password: string): Promise<AuthResponse> {
+  async login(email: string, password: string, turnstileToken?: string): Promise<AuthResponse> {
     const url = `${this.baseUrl}/api/v1/auth/login`;
     const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ email, password, turnstile_token: turnstileToken }),
     });
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));

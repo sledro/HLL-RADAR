@@ -236,6 +236,7 @@ export interface AuthStatus {
   auth_required: boolean;
   authenticated: boolean;
   auth_type: string;
+  turnstile_site_key?: string;
 }
 
 export interface User {

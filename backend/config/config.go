@@ -20,6 +20,12 @@ type HostedConfig struct {
 	BaseURL             string `mapstructure:"base_url"`
 }
 
+// TurnstileConfig holds Cloudflare Turnstile configuration
+type TurnstileConfig struct {
+	SiteKey   string `mapstructure:"site_key"`
+	SecretKey string `mapstructure:"secret_key"`
+}
+
 // SMTPConfig holds SMTP configuration for sending invite emails
 type SMTPConfig struct {
 	Host     string `mapstructure:"host"`
@@ -90,6 +96,10 @@ func Load() error {
 	viper.SetDefault("smtp.username", "")
 	viper.SetDefault("smtp.password", "")
 	viper.SetDefault("smtp.from", "")
+
+	// [turnstile] (optional, hosted mode)
+	viper.SetDefault("turnstile.site_key", "")
+	viper.SetDefault("turnstile.secret_key", "")
 
 	// Enable environment variable overrides with HLL_ prefix.
 	// Uses "__" (double underscore) as the key delimiter for nested keys:
@@ -188,6 +198,20 @@ func GetHostedConfig() HostedConfig {
 		cfg.JWTRefreshTTLDays = 30
 	}
 	return cfg
+}
+
+// GetTurnstileConfig returns the Turnstile configuration.
+func GetTurnstileConfig() TurnstileConfig {
+	return TurnstileConfig{
+		SiteKey:   viper.GetString("turnstile.site_key"),
+		SecretKey: viper.GetString("turnstile.secret_key"),
+	}
+}
+
+// IsTurnstileEnabled returns true if Turnstile is configured.
+func IsTurnstileEnabled() bool {
+	cfg := GetTurnstileConfig()
+	return cfg.SiteKey != "" && cfg.SecretKey != ""
 }
 
 // GetSMTPConfig returns the SMTP configuration.

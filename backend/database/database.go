@@ -82,11 +82,12 @@ type OrgInvitation struct {
 }
 
 type RefreshToken struct {
-	ID        int64     `json:"id"`
-	UserID    int64     `json:"user_id"`
-	TokenHash string    `json:"-"`
-	ExpiresAt time.Time `json:"expires_at"`
-	CreatedAt time.Time `json:"created_at"`
+	ID          int64     `json:"id"`
+	UserID      int64     `json:"user_id"`
+	TokenHash   string    `json:"-"`
+	Fingerprint string    `json:"-"`
+	ExpiresAt   time.Time `json:"expires_at"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 type StrongPoint struct {
@@ -1737,10 +1738,10 @@ func (d *Database) GetPendingInvitations(ctx context.Context, orgID int64) ([]Or
 
 // ==================== Multi-tenancy: Refresh Tokens ====================
 
-func (d *Database) CreateRefreshToken(ctx context.Context, userID int64, tokenHash string, expiresAt time.Time) error {
+func (d *Database) CreateRefreshToken(ctx context.Context, userID int64, tokenHash, fingerprint string, expiresAt time.Time) error {
 	_, err := d.pool.Exec(ctx,
-		`INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
-		userID, tokenHash, expiresAt,
+		`INSERT INTO refresh_tokens (user_id, token_hash, fingerprint, expires_at) VALUES ($1, $2, $3, $4)`,
+		userID, tokenHash, fingerprint, expiresAt,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create refresh token: %w", err)
@@ -1749,11 +1750,11 @@ func (d *Database) CreateRefreshToken(ctx context.Context, userID int64, tokenHa
 }
 
 func (d *Database) GetRefreshToken(ctx context.Context, tokenHash string) (*RefreshToken, error) {
-	query := `SELECT id, user_id, token_hash, expires_at, created_at
+	query := `SELECT id, user_id, token_hash, fingerprint, expires_at, created_at
 			  FROM refresh_tokens WHERE token_hash = $1`
 	var rt RefreshToken
 	err := d.pool.QueryRow(ctx, query, tokenHash).Scan(
-		&rt.ID, &rt.UserID, &rt.TokenHash, &rt.ExpiresAt, &rt.CreatedAt,
+		&rt.ID, &rt.UserID, &rt.TokenHash, &rt.Fingerprint, &rt.ExpiresAt, &rt.CreatedAt,
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {
@@ -1840,4 +1841,32 @@ func (d *Database) GetOrgServerIDs(ctx context.Context, orgID int64) ([]int64, e
 		ids = append(ids, id)
 	}
 	return ids, nil
+}
+
+// GetMatchesByOrg returns recent matches for all servers belonging to an org.
+func (d *Database) GetMatchesByOrg(ctx context.Context, orgID int64, limit int) ([]Match, error) {
+	query := `SELECT m.id, m.server_id, m.map_name, m.start_time, m.end_time, m.is_active,
+				m.player_count_peak, m.duration_seconds, m.final_score_allies, m.final_score_axis
+			  FROM matches m
+			  JOIN servers s ON m.server_id = s.id
+			  WHERE s.org_id = $1 AND (m.is_active = true OR m.end_time IS NOT NULL)
+			  ORDER BY m.start_time DESC LIMIT $2`
+	rows, err := d.pool.Query(ctx, query, orgID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get matches by org: %w", err)
+	}
+	defer rows.Close()
+
+	var matches []Match
+	for rows.Next() {
+		var m Match
+		if err := rows.Scan(&m.ID, &m.ServerID, &m.MapName, &m.StartTime, &m.EndTime,
+			&m.IsActive, &m.PlayerCountPeak, &m.DurationSeconds,
+			&m.FinalScoreAllies, &m.FinalScoreAxis); err != nil {
+			d.log.Error("Failed to scan match", "error", err)
+			continue
+		}
+		matches = append(matches, m)
+	}
+	return matches, nil
 }

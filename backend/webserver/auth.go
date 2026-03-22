@@ -195,10 +195,14 @@ func jwtAuthMiddleware(logger *slog.Logger, jwtSecret string) func(http.Handler)
 				return
 			}
 
-			// Whitelist paths that don't require auth
+			// Whitelist specific paths that don't require auth
 			path := r.URL.Path
 			if path == "/health" ||
-				strings.HasPrefix(path, "/api/v1/auth/") ||
+				path == "/api/v1/auth/status" ||
+				path == "/api/v1/auth/signup" ||
+				path == "/api/v1/auth/login" ||
+				path == "/api/v1/auth/refresh" ||
+				path == "/api/v1/auth/invite/accept" ||
 				path == "/ws" ||
 				!strings.HasPrefix(path, "/api/") {
 				next.ServeHTTP(w, r)
@@ -222,6 +226,18 @@ func jwtAuthMiddleware(logger *slog.Logger, jwtSecret string) func(http.Handler)
 					"error": "Invalid or expired token.",
 				})
 				return
+			}
+
+			// Verify device fingerprint matches the token
+			if claims.Fingerprint != "" {
+				requestFP := auth.RequestFingerprint(r)
+				if claims.Fingerprint != requestFP {
+					logger.Warn("JWT fingerprint mismatch", "user_id", claims.UserID)
+					writeJSON(w, http.StatusUnauthorized, map[string]string{
+						"error": "Token not valid for this device.",
+					})
+					return
+				}
 			}
 
 			// Set auth context

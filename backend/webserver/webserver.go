@@ -156,6 +156,7 @@ func NewWebServer(port int, db *database.Database, logger *slog.Logger, corsOrig
 		router.HandleFunc("/api/v1/auth/login", ws.handleLogin).Methods("POST", "OPTIONS")
 		router.HandleFunc("/api/v1/auth/refresh", ws.handleRefreshToken).Methods("POST", "OPTIONS")
 		router.HandleFunc("/api/v1/auth/invite/accept", ws.handleAcceptInvite).Methods("POST", "OPTIONS")
+		router.HandleFunc("/api/v1/auth/logout", ws.handleLogout).Methods("POST", "OPTIONS")
 
 		// Org management
 		router.HandleFunc("/api/v1/org", ws.handleGetOrg).Methods("GET", "OPTIONS")

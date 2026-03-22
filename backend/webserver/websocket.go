@@ -69,6 +69,11 @@ func (ws *WebServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid token", http.StatusUnauthorized)
 			return
 		}
+		// Verify device fingerprint
+		if claims.Fingerprint != "" && claims.Fingerprint != auth.RequestFingerprint(r) {
+			http.Error(w, "Token not valid for this device", http.StatusUnauthorized)
+			return
+		}
 		orgID = claims.OrgID
 		ctx := context.Background()
 		serverIDs, _ = ws.db.GetOrgServerIDs(ctx, orgID)

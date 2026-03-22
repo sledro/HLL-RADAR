@@ -16,14 +16,16 @@ interface AuthContextValue {
   isOwner: boolean;
   mode: string;
   isLoading: boolean;
-  login: (email: string, password: string) => Promise<void>;
+  login: (email: string, password: string, turnstileToken?: string) => Promise<void>;
   signup: (
     email: string,
     password: string,
     displayName: string,
-    orgName: string
+    orgName: string,
+    turnstileToken?: string
   ) => Promise<void>;
   logout: () => void;
+  turnstileSiteKey: string | null;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -38,6 +40,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return stored ? JSON.parse(stored) : null;
   });
   const [isLoading, setIsLoading] = useState(true);
+  const [turnstileSiteKey, setTurnstileSiteKey] = useState<string | null>(null);
 
   const isAuthenticated = !!user && !!localStorage.getItem("access_token");
   const isOwner = user?.role === "owner";
@@ -45,15 +48,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Validate token on mount
   useEffect(() => {
     const token = localStorage.getItem("access_token");
-    if (!token) {
-      setIsLoading(false);
-      return;
-    }
-    // Verify token is still valid by checking auth status
+    // Always fetch auth status to get turnstile site key
     apiClient
       .getAuthStatus()
       .then((status) => {
-        if (!status.authenticated) {
+        if (status.turnstile_site_key) {
+          setTurnstileSiteKey(status.turnstile_site_key);
+        }
+        if (token && !status.authenticated) {
           // Token invalid, clear state
           localStorage.removeItem("access_token");
           localStorage.removeItem("refresh_token");
@@ -92,8 +94,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => clearInterval(interval);
   }, [isAuthenticated]);
 
-  const login = useCallback(async (email: string, password: string) => {
-    const result = await apiClient.login(email, password);
+  const login = useCallback(async (email: string, password: string, turnstileToken?: string) => {
+    const result = await apiClient.login(email, password, turnstileToken);
     localStorage.setItem("access_token", result.access_token);
     localStorage.setItem("refresh_token", result.refresh_token);
     localStorage.setItem("user", JSON.stringify(result.user));
@@ -107,13 +109,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       email: string,
       password: string,
       displayName: string,
-      orgName: string
+      orgName: string,
+      turnstileToken?: string
     ) => {
       const result = await apiClient.signup(
         email,
         password,
         displayName,
-        orgName
+        orgName,
+        turnstileToken
       );
       localStorage.setItem("access_token", result.access_token);
       localStorage.setItem("refresh_token", result.refresh_token);
@@ -153,6 +157,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         login,
         signup,
         logout,
+        turnstileSiteKey,
       }}
     >
       {children}

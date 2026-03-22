@@ -8,17 +8,19 @@ import (
 )
 
 type Claims struct {
-	UserID int64  `json:"user_id"`
-	OrgID  int64  `json:"org_id"`
-	Role   string `json:"role"`
+	UserID      int64  `json:"user_id"`
+	OrgID       int64  `json:"org_id"`
+	Role        string `json:"role"`
+	Fingerprint string `json:"fpr"` // SHA-256 of IP + User-Agent
 	jwt.RegisteredClaims
 }
 
-func CreateAccessToken(userID, orgID int64, role, secret string, ttl time.Duration) (string, error) {
+func CreateAccessToken(userID, orgID int64, role, secret, fingerprint string, ttl time.Duration) (string, error) {
 	claims := Claims{
-		UserID: userID,
-		OrgID:  orgID,
-		Role:   role,
+		UserID:      userID,
+		OrgID:       orgID,
+		Role:        role,
+		Fingerprint: fingerprint,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(ttl)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -29,8 +31,8 @@ func CreateAccessToken(userID, orgID int64, role, secret string, ttl time.Durati
 	return token.SignedString([]byte(secret))
 }
 
-func CreateTokenPair(userID, orgID int64, role, secret string, accessTTL, refreshTTL time.Duration) (accessToken, refreshToken string, err error) {
-	accessToken, err = CreateAccessToken(userID, orgID, role, secret, accessTTL)
+func CreateTokenPair(userID, orgID int64, role, secret, fingerprint string, accessTTL, refreshTTL time.Duration) (accessToken, refreshToken string, err error) {
+	accessToken, err = CreateAccessToken(userID, orgID, role, secret, fingerprint, accessTTL)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to create access token: %w", err)
 	}

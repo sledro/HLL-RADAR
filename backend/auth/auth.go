@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net/http"
+	"strings"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -44,4 +46,37 @@ func generateRandomHex(nBytes int) (string, error) {
 		return "", fmt.Errorf("failed to generate random bytes: %w", err)
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// DeviceFingerprint produces a SHA-256 hash of the client's IP and User-Agent.
+// This is embedded in JWT claims and stored alongside refresh tokens so that
+// tokens cannot be used from a different device/network.
+func DeviceFingerprint(ip, userAgent string) string {
+	h := sha256.Sum256([]byte(ip + "|" + userAgent))
+	return hex.EncodeToString(h[:])
+}
+
+// RequestFingerprint extracts IP and User-Agent from an HTTP request and returns the fingerprint.
+func RequestFingerprint(r *http.Request) string {
+	return DeviceFingerprint(ClientIP(r), r.UserAgent())
+}
+
+// ClientIP extracts the real client IP from a request, checking X-Forwarded-For
+// and X-Real-IP headers (set by reverse proxies like Railway/nginx).
+func ClientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		// X-Forwarded-For can contain multiple IPs; the first is the client
+		if i := strings.Index(xff, ","); i > 0 {
+			return strings.TrimSpace(xff[:i])
+		}
+		return strings.TrimSpace(xff)
+	}
+	if xri := r.Header.Get("X-Real-IP"); xri != "" {
+		return strings.TrimSpace(xri)
+	}
+	// Fall back to RemoteAddr (includes port)
+	if i := strings.LastIndex(r.RemoteAddr, ":"); i > 0 {
+		return r.RemoteAddr[:i]
+	}
+	return r.RemoteAddr
 }

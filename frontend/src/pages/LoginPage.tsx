@@ -1,6 +1,7 @@
-import { useState, type FormEvent } from "react";
+import { useState, useCallback, type FormEvent } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
+import { Turnstile } from "../components/Turnstile";
 
 const styles: Record<string, React.CSSProperties> = {
   container: {
@@ -75,17 +76,26 @@ const styles: Record<string, React.CSSProperties> = {
 export function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [turnstileToken, setTurnstileToken] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const navigate = useNavigate();
   const auth = useAuth();
 
+  const handleTurnstileToken = useCallback((token: string) => {
+    setTurnstileToken(token);
+  }, []);
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setError("");
+    if (auth.turnstileSiteKey && !turnstileToken) {
+      setError("Please complete the captcha");
+      return;
+    }
     setSubmitting(true);
     try {
-      await auth.login(email, password);
+      await auth.login(email, password, turnstileToken || undefined);
       navigate("/");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed");
@@ -122,6 +132,13 @@ export function LoginPage() {
               autoComplete="current-password"
             />
           </div>
+          {auth.turnstileSiteKey && (
+            <Turnstile
+              siteKey={auth.turnstileSiteKey}
+              onToken={handleTurnstileToken}
+              onExpire={() => setTurnstileToken("")}
+            />
+          )}
           <button style={styles.button} type="submit" disabled={submitting}>
             {submitting ? "Logging in..." : "Log In"}
           </button>
