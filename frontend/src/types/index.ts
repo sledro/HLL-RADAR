@@ -229,3 +229,47 @@ export interface SpawnEvent extends MatchEvent {
   spawn_unit: string;
   confidence: number;
 }
+
+// Multi-tenancy types
+export interface AuthStatus {
+  mode: string;
+  auth_required: boolean;
+  authenticated: boolean;
+  auth_type: string;
+  turnstile_site_key?: string;
+}
+
+export interface User {
+  id: number;
+  email: string;
+  display_name: string;
+  role: string;
+}
+
+export interface Organization {
+  id: number;
+  name: string;
+  slug: string;
+}
+
+export interface AuthResponse {
+  access_token: string;
+  refresh_token: string;
+  user: User;
+  org: Organization;
+}
+
+export interface OrgMember {
+  id: number;
+  email: string;
+  display_name: string;
+  role: string;
+  created_at: string;
+}
+
+export interface InviteResponse {
+  id: number;
+  email: string;
+  invite_url?: string;
+  expires_at: string;
+}

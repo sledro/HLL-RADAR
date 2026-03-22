@@ -3,6 +3,7 @@ package webserver
 import (
 	"context"
 	"fmt"
+	"hll-radar/config"
 	"hll-radar/database"
 	"log/slog"
 	"net/http"
@@ -37,6 +38,13 @@ type SpawnPoint struct {
 // GetLiveSpawnsFunc returns aggregated spawn points for a server
 type GetLiveSpawnsFunc func(serverID int64) []SpawnPoint
 
+// TrackerManagerInterface abstracts the tracker manager for server lifecycle operations.
+type TrackerManagerInterface interface {
+	StartServer(serverID int64) error
+	StopServer(serverID int64)
+	TestConnection(host string, port int, password string) error
+}
+
 type WebServer struct {
 	db                     *database.Database
 	log                    *slog.Logger
@@ -53,6 +61,7 @@ type WebServer struct {
 	punishPlayerFunc       PlayerActionFunc
 	kickPlayerFunc         PlayerActionFunc
 	getLiveSpawnsFunc      GetLiveSpawnsFunc
+	trackerManager         TrackerManagerInterface // only set in hosted mode
 }
 
 type MapData struct {
@@ -97,7 +106,12 @@ func NewWebServer(port int, db *database.Database, logger *slog.Logger, corsOrig
 
 	// Apply middleware
 	router.Use(corsMiddleware(ws))
-	router.Use(crconAuthMiddleware(logger))
+	if config.IsHostedMode() {
+		hostedCfg := config.GetHostedConfig()
+		router.Use(jwtAuthMiddleware(logger, hostedCfg.JWTSecret))
+	} else {
+		router.Use(crconAuthMiddleware(logger))
+	}
 	router.Use(rateLimitMiddleware(newRateLimiter(20, 40))) // 20 req/s per IP, burst of 40
 	router.Use(recoveryMiddleware(logger))
 	router.Use(loggingMiddleware(logger))
@@ -134,6 +148,32 @@ func NewWebServer(port int, db *database.Database, logger *slog.Logger, corsOrig
 	router.HandleFunc("/api/v1/punish-player", ws.handlePunishPlayer).Methods("POST", "OPTIONS")
 	router.HandleFunc("/api/v1/kick-player", ws.handleKickPlayer).Methods("POST", "OPTIONS")
 	router.HandleFunc("/api/v1/live-spawns", ws.handleLiveSpawns).Methods("GET", "OPTIONS")
+
+	// Hosted mode endpoints (auth, org management, server CRUD)
+	if config.IsHostedMode() {
+		// Auth endpoints (whitelisted from JWT middleware)
+		router.HandleFunc("/api/v1/auth/signup", ws.handleSignup).Methods("POST", "OPTIONS")
+		router.HandleFunc("/api/v1/auth/login", ws.handleLogin).Methods("POST", "OPTIONS")
+		router.HandleFunc("/api/v1/auth/refresh", ws.handleRefreshToken).Methods("POST", "OPTIONS")
+		router.HandleFunc("/api/v1/auth/invite/accept", ws.handleAcceptInvite).Methods("POST", "OPTIONS")
+		router.HandleFunc("/api/v1/auth/logout", ws.handleLogout).Methods("POST", "OPTIONS")
+
+		// Org management
+		router.HandleFunc("/api/v1/org", ws.handleGetOrg).Methods("GET", "OPTIONS")
+		router.HandleFunc("/api/v1/org/members", ws.handleGetOrgMembers).Methods("GET", "OPTIONS")
+		router.HandleFunc("/api/v1/org/invite", requireOwner(ws.handleInviteAdmin)).Methods("POST", "OPTIONS")
+		router.HandleFunc("/api/v1/org/members/{user_id}", requireOwner(ws.handleRemoveMember)).Methods("DELETE", "OPTIONS")
+
+		// Server CRUD (POST/PUT/DELETE require owner)
+		router.HandleFunc("/api/v1/servers", requireOwner(ws.handleCreateServer)).Methods("POST")
+		router.HandleFunc("/api/v1/servers/{id}/test", requireOwner(ws.handleTestServer)).Methods("POST", "OPTIONS")
+		router.HandleFunc("/api/v1/servers/{id}", requireOwner(ws.handleUpdateServer)).Methods("PUT", "OPTIONS")
+		router.HandleFunc("/api/v1/servers/{id}", requireOwner(ws.handleDeleteServer)).Methods("DELETE", "OPTIONS")
+		router.HandleFunc("/api/v1/servers/{id}/toggle", requireOwner(ws.handleToggleServer)).Methods("POST", "OPTIONS")
+		router.HandleFunc("/api/v1/servers/all", ws.handleAllServers).Methods("GET", "OPTIONS")
+
+		logger.Info("Hosted mode API endpoints registered")
+	}
 
 	// WebSocket endpoint
 	router.HandleFunc("/ws", ws.handleWebSocket)
@@ -175,6 +215,11 @@ func (ws *WebServer) SetKickPlayerFunc(fn PlayerActionFunc) {
 // SetGetLiveSpawnsFunc registers the callback to get live spawn points.
 func (ws *WebServer) SetGetLiveSpawnsFunc(fn GetLiveSpawnsFunc) {
 	ws.getLiveSpawnsFunc = fn
+}
+
+// SetTrackerManager sets the tracker manager for dynamic server lifecycle (hosted mode).
+func (ws *WebServer) SetTrackerManager(tm TrackerManagerInterface) {
+	ws.trackerManager = tm
 }
 
 func (ws *WebServer) Start(ctx context.Context) error {

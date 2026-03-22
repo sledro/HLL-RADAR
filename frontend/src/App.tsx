@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
+import { BrowserRouter, Routes, Route, Navigate, useNavigate } from "react-router-dom";
 import { ConnectionStatus } from "./components/ConnectionStatus";
 import { MatchList } from "./components/MatchList";
 import { apiClient } from "./services/api";
@@ -11,18 +12,29 @@ import { usePlayerPositions } from "./hooks/usePlayerPositions";
 import { useKillEvents } from "./hooks/useKillEvents";
 import { useSpawnEvents } from "./hooks/useSpawnEvents";
 import { useDisplayedPlayers } from "./hooks/useDisplayedPlayers";
-import type { MatchEvent, WebSocketMessage } from "./types";
+import type { AuthStatus, MatchEvent, WebSocketMessage } from "./types";
 import { SPEditor } from "./components/SPEditor";
 import { LoginRequired } from "./components/LoginRequired";
+import { AuthProvider, useAuth } from "./contexts/AuthContext";
+import { ProtectedRoute } from "./components/ProtectedRoute";
+import { LoginPage } from "./pages/LoginPage";
+import { SignupPage } from "./pages/SignupPage";
+import { InviteAcceptPage } from "./pages/InviteAcceptPage";
+import { OrgSettingsPage } from "./pages/OrgSettingsPage";
 import "./App.css";
 
-function App() {
-  const [authState, setAuthState] = useState<"checking" | "ok" | "required">("checking");
+// ─── Shared dashboard content (used by both standalone and hosted) ───────────
+
+function DashboardContent({ hostedMode, isOwner }: { hostedMode?: boolean; isOwner?: boolean }) {
+  const [authState, setAuthState] = useState<"checking" | "ok" | "required">(
+    hostedMode ? "ok" : "checking"
+  );
   const [spEditorMode, setSpEditorMode] = useState(false);
   const [spEditorEnabled, setSpEditorEnabled] = useState(false);
 
-  // Check auth status on mount
+  // In standalone mode, check CRCON auth
   useEffect(() => {
+    if (hostedMode) return;
     apiClient
       .getAuthStatus()
       .then((status) => {
@@ -33,22 +45,24 @@ function App() {
         }
       })
       .catch(() => {
-        // If we can't reach the backend at all, allow through — the app will
-        // show connection errors elsewhere.
         setAuthState("ok");
       });
-  }, []);
+  }, [hostedMode]);
 
   // Listen for session expiry mid-use (401 from any API call)
   useEffect(() => {
+    if (hostedMode) return;
     const handler = () => setAuthState("required");
     window.addEventListener("hll-radar-auth-expired", handler);
     return () => window.removeEventListener("hll-radar-auth-expired", handler);
-  }, []);
+  }, [hostedMode]);
 
   useEffect(() => {
     if (authState === "ok") {
-      apiClient.getConfig().then((cfg) => setSpEditorEnabled(cfg.sp_editor)).catch(() => {});
+      apiClient
+        .getConfig()
+        .then((cfg) => setSpEditorEnabled(cfg.sp_editor))
+        .catch(() => {});
     }
   }, [authState]);
 
@@ -62,7 +76,7 @@ function App() {
   // Fetch available servers
   const { servers, loading: serversLoading } = useServers();
 
-  // Set default server when servers are loaded, or validate saved selection still exists
+  // Set default server when servers are loaded
   useEffect(() => {
     if (servers.length === 0) return;
     const savedExists =
@@ -73,7 +87,7 @@ function App() {
     }
   }, [servers, selectedServerId]);
 
-  // Persist server selection to localStorage
+  // Persist server selection
   useEffect(() => {
     if (selectedServerId !== undefined) {
       localStorage.setItem("selectedServerId", String(selectedServerId));
@@ -107,13 +121,11 @@ function App() {
     clearHistorical,
   } = usePlayerPositions(selectedServerId);
 
-  // Wrap handleBackToLive to also clear historical positions
   const handleBackToLive = useCallback(() => {
     rawHandleBackToLive();
     clearHistorical();
   }, [rawHandleBackToLive, clearHistorical]);
 
-  // Data fetching hook for the currently viewed match
   const {
     matchData,
     loading,
@@ -123,17 +135,14 @@ function App() {
 
   const currentMatch = matchData?.match || null;
 
-  // Always fetch live match info so the sidebar can show it
   const { matchData: liveMatchData, refetch: refetchLiveMatch } = useMatchData(
     undefined,
     selectedServerId
   );
   const liveMatch = liveMatchData?.match || null;
 
-  // Match event tracking
   const [newMatchEvent, setNewMatchEvent] = useState<MatchEvent | null>(null);
 
-  // Kill and death event management
   const { killEvents, deathOverlays, handleLiveKillEvent } = useKillEvents(
     currentMatch?.id,
     historicalPositions,
@@ -141,14 +150,12 @@ function App() {
     livePlayerPositions
   );
 
-  // Spawn event management
   const { spawnPositions, handleLiveSpawnEvent } = useSpawnEvents(
     currentMatch?.id,
     selectedServerId,
     isLive
   );
 
-  // Displayed players (live or timeline)
   const { displayedPlayers } = useDisplayedPlayers(
     isLive,
     currentMatch,
@@ -156,38 +163,50 @@ function App() {
     livePlayerPositions
   );
 
-  // Track elapsed time for live matches
   useElapsedTime(isLive, currentMatch, setElapsedTime);
 
-  // Fetch objective_captured events once for historic matches, compute score locally
-  const [scoreEvents, setScoreEvents] = useState<{ timestamp: number; allies: number; axis: number }[]>([]);
+  const [scoreEvents, setScoreEvents] = useState<
+    { timestamp: number; allies: number; axis: number }[]
+  >([]);
   useEffect(() => {
     if (isLive || !currentMatch?.id) {
       setScoreEvents([]);
       return;
     }
     let cancelled = false;
-    apiClient.getMatchEvents(currentMatch.id, 1000, ["objective_captured"]).then((events) => {
-      if (cancelled) return;
-      const startTime = new Date(currentMatch.start_time).getTime();
-      const parsed = events.map((e) => {
-        const secs = (new Date(e.timestamp).getTime() - startTime) / 1000;
-        try {
-          const d = JSON.parse(e.details || "{}");
-          return { timestamp: secs, allies: d.new_score_allies ?? 2, axis: d.new_score_axis ?? 2 };
-        } catch {
-          return { timestamp: secs, allies: 2, axis: 2 };
-        }
-      }).sort((a, b) => a.timestamp - b.timestamp);
-      setScoreEvents(parsed);
-    }).catch(() => {});
-    return () => { cancelled = true; };
+    apiClient
+      .getMatchEvents(currentMatch.id, 1000, ["objective_captured"])
+      .then((events) => {
+        if (cancelled) return;
+        const startTime = new Date(currentMatch.start_time).getTime();
+        const parsed = events
+          .map((e) => {
+            const secs =
+              (new Date(e.timestamp).getTime() - startTime) / 1000;
+            try {
+              const d = JSON.parse(e.details || "{}");
+              return {
+                timestamp: secs,
+                allies: d.new_score_allies ?? 2,
+                axis: d.new_score_axis ?? 2,
+              };
+            } catch {
+              return { timestamp: secs, allies: 2, axis: 2 };
+            }
+          })
+          .sort((a, b) => a.timestamp - b.timestamp);
+        setScoreEvents(parsed);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, [isLive, currentMatch?.id, currentMatch?.start_time]);
 
-  // Compute score at current timeline position from cached events (synchronous, no flicker)
   const historicScore = useMemo(() => {
     if (isLive || scoreEvents.length === 0) return null;
-    let allies = 2, axis = 2;
+    let allies = 2,
+      axis = 2;
     for (const e of scoreEvents) {
       if (e.timestamp > timelineValue) break;
       allies = e.allies;
@@ -198,22 +217,18 @@ function App() {
 
   const displayScore = historicScore ?? matchScore;
 
-  // Initialize live positions from API data
   useEffect(() => {
     if (matchData?.players) {
       initializeFromApi(matchData.players);
     }
   }, [matchData?.players, initializeFromApi]);
 
-  // WebSocket connection for live updates
   const { isConnected, connectionError } = useWebSocket(
     apiClient.getWebSocketUrl(),
     {
       onMessage: (message: WebSocketMessage) => {
-        // Player delta updates
         handlePlayerDelta(message);
 
-        // Score updates from delta
         if (
           message.type === "player_delta" &&
           message.payload?.server_id === selectedServerId &&
@@ -226,11 +241,15 @@ function App() {
           );
         }
 
-        // Match lifecycle
-        handleMatchStart(message, () => { refetchMatchData(); refetchLiveMatch(); });
-        handleMatchEnd(message, () => { refetchMatchData(); refetchLiveMatch(); });
+        handleMatchStart(message, () => {
+          refetchMatchData();
+          refetchLiveMatch();
+        });
+        handleMatchEnd(message, () => {
+          refetchMatchData();
+          refetchLiveMatch();
+        });
 
-        // Match events
         if (message.type === "match_event") {
           if (
             selectedServerId !== undefined &&
@@ -238,7 +257,6 @@ function App() {
           ) {
             return;
           }
-
           const event = message.payload?.event;
           setNewMatchEvent(event);
           handleLiveSpawnEvent(event);
@@ -251,23 +269,25 @@ function App() {
   const handleEventClick = useCallback(
     (eventTimestamp: string) => {
       if (!currentMatch?.start_time) return;
-
       const matchStartTime = new Date(currentMatch.start_time).getTime();
       const clickedEventTime = new Date(eventTimestamp).getTime();
       const secondsFromStart = Math.floor(
         (clickedEventTime - matchStartTime) / 1000
       );
-
       handleTimelineChange(secondsFromStart);
     },
     [currentMatch, handleTimelineChange]
   );
 
-  if (authState === "checking") {
-    return <div className="app"><div className="loading">Checking authentication...</div></div>;
+  if (!hostedMode && authState === "checking") {
+    return (
+      <div className="app">
+        <div className="loading">Checking authentication...</div>
+      </div>
+    );
   }
 
-  if (authState === "required") {
+  if (!hostedMode && authState === "required") {
     return <LoginRequired />;
   }
 
@@ -278,7 +298,7 @@ function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <h1>HLL RADAR 📡</h1>
+        <h1>HLL RADAR</h1>
         <div className="header-controls">
           {spEditorEnabled && (
             <button
@@ -289,6 +309,7 @@ function App() {
               SP Editor
             </button>
           )}
+          {hostedMode && isOwner && <SettingsLink />}
           {!serversLoading && servers.length > 0 && (
             <div className="server-selector-container">
               <select
@@ -310,6 +331,7 @@ function App() {
             </div>
           )}
           <ConnectionStatus isConnected={isConnected} error={connectionError} />
+          {hostedMode && <UserMenu />}
           <a
             href="https://github.com/sledro/HLL-RADAR"
             target="_blank"
@@ -317,8 +339,13 @@ function App() {
             className="github-link"
             title="View on GitHub"
           >
-            <svg viewBox="0 0 16 16" width="24" height="24" fill="currentColor">
-              <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+            <svg
+              viewBox="0 0 16 16"
+              width="24"
+              height="24"
+              fill="currentColor"
+            >
+              <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
             </svg>
           </a>
         </div>
@@ -381,6 +408,118 @@ function App() {
       </div>
     </div>
   );
+}
+
+function OwnerRoute({ children }: { children: React.ReactNode }) {
+  const auth = useAuth();
+  if (!auth.isOwner) {
+    return <Navigate to="/" replace />;
+  }
+  return <>{children}</>;
+}
+
+function HostedDashboard() {
+  const auth = useAuth();
+  return <DashboardContent hostedMode={true} isOwner={auth.isOwner} />;
+}
+
+// ─── Small hosted-mode header components ─────────────────────────────────────
+
+function SettingsLink() {
+  const navigate = useNavigate();
+  return (
+    <button
+      className="sp-editor-btn"
+      onClick={() => navigate("/settings")}
+      title="Organization Settings"
+      style={{ marginRight: "0.25rem" }}
+    >
+      Settings
+    </button>
+  );
+}
+
+function UserMenu() {
+  const auth = useAuth();
+  return (
+    <button
+      className="sp-editor-btn"
+      onClick={() => auth.logout()}
+      title="Log out"
+      style={{ marginRight: "0.25rem" }}
+    >
+      {auth.user?.display_name ?? "Logout"}
+    </button>
+  );
+}
+
+// ─── Standalone App (unchanged behavior) ─────────────────────────────────────
+
+function StandaloneApp() {
+  return <DashboardContent hostedMode={false} />;
+}
+
+// ─── Hosted App (with router + auth) ─────────────────────────────────────────
+
+function HostedApp() {
+  return (
+    <BrowserRouter>
+      <AuthProvider>
+        <Routes>
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/signup" element={<SignupPage />} />
+          <Route path="/invite/:token" element={<InviteAcceptPage />} />
+          <Route
+            path="/settings"
+            element={
+              <ProtectedRoute>
+                <OwnerRoute>
+                  <OrgSettingsPage />
+                </OwnerRoute>
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/"
+            element={
+              <ProtectedRoute>
+                <HostedDashboard />
+              </ProtectedRoute>
+            }
+          />
+        </Routes>
+      </AuthProvider>
+    </BrowserRouter>
+  );
+}
+
+// ─── Root App — detects mode then delegates ──────────────────────────────────
+
+function App() {
+  const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
+
+  useEffect(() => {
+    apiClient
+      .getAuthStatus()
+      .then(setAuthStatus)
+      .catch(() => {
+        // Can't reach backend, default to standalone
+        setAuthStatus({
+          mode: "standalone",
+          auth_required: false,
+          authenticated: false,
+          auth_type: "crcon",
+        });
+      });
+  }, []);
+
+  if (!authStatus) return <div>Loading...</div>;
+
+  if (authStatus.mode === "hosted") {
+    return <HostedApp />;
+  }
+
+  return <StandaloneApp />;
 }
 
 export default App;

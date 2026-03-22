@@ -1,6 +1,7 @@
 package webserver
 
 import (
+	"hll-radar/auth"
 	"net/http"
 	"sync"
 	"time"
@@ -74,7 +75,7 @@ func (rl *rateLimiter) cleanup() {
 func rateLimitMiddleware(rl *rateLimiter) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !rl.allow(r.RemoteAddr) {
+			if !rl.allow(auth.ClientIP(r)) {
 				http.Error(w, "Too many requests", http.StatusTooManyRequests)
 				return
 			}

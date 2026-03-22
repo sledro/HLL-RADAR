@@ -48,6 +48,45 @@ type Server struct {
 	Port        int       `json:"port"`
 	Password    string    `json:"-"` // Never expose password in JSON
 	IsActive    bool      `json:"is_active"`
+	OrgID       *int64    `json:"org_id,omitempty"` // nil in standalone mode
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+type Organization struct {
+	ID        int64     `json:"id"`
+	Name      string    `json:"name"`
+	Slug      string    `json:"slug"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type User struct {
+	ID           int64     `json:"id"`
+	Email        string    `json:"email"`
+	PasswordHash string    `json:"-"`
+	DisplayName  string    `json:"display_name"`
+	OrgID        int64     `json:"org_id"`
+	Role         string    `json:"role"`
+	IsActive     bool      `json:"is_active"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+type OrgInvitation struct {
+	ID         int64      `json:"id"`
+	OrgID      int64      `json:"org_id"`
+	Email      string     `json:"email"`
+	InviteToken string    `json:"-"`
+	InvitedBy  int64      `json:"invited_by"`
+	ExpiresAt  time.Time  `json:"expires_at"`
+	AcceptedAt *time.Time `json:"accepted_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+}
+
+type RefreshToken struct {
+	ID          int64     `json:"id"`
+	UserID      int64     `json:"user_id"`
+	TokenHash   string    `json:"-"`
+	Fingerprint string    `json:"-"`
+	ExpiresAt   time.Time `json:"expires_at"`
 	CreatedAt   time.Time `json:"created_at"`
 }
 
@@ -120,12 +159,16 @@ func EnsureDatabase(connectionString string, logger *slog.Logger) error {
 
 	// Connect to 'postgres' system database to create the target database
 	config.ConnConfig.Database = "postgres"
+	sslmode := "disable"
+	if config.ConnConfig.TLSConfig != nil {
+		sslmode = "require"
+	}
 	systemConnStr := fmt.Sprintf("postgres://%s:%s@%s:%d/postgres?sslmode=%s",
 		config.ConnConfig.User,
 		config.ConnConfig.Password,
 		config.ConnConfig.Host,
 		config.ConnConfig.Port,
-		"disable", // Use sslmode from original if needed
+		sslmode,
 	)
 
 	// Create a single connection to check/create database
@@ -482,17 +525,17 @@ func (d *Database) GetActiveMatch(ctx context.Context, serverID int64) (*Match, 
 	return &match, nil
 }
 
-func (d *Database) EndAllMatches(ctx context.Context, endTime time.Time) error {
+func (d *Database) EndAllMatches(ctx context.Context, serverID int64, endTime time.Time) error {
 	query := `
-	UPDATE matches 
+	UPDATE matches
 	SET is_active = FALSE, end_time = $1,
 		duration_seconds = EXTRACT(EPOCH FROM ($1 - start_time))::INTEGER
-	WHERE is_active = TRUE
+	WHERE is_active = TRUE AND server_id = $2
 	`
 
-	_, err := d.pool.Exec(ctx, query, endTime)
+	_, err := d.pool.Exec(ctx, query, endTime, serverID)
 	if err != nil {
-		return fmt.Errorf("failed to end all active matches: %w", err)
+		return fmt.Errorf("failed to end all active matches for server %d: %w", serverID, err)
 	}
 
 	return nil
@@ -842,6 +885,7 @@ func normalizeMapName(rawMapName string) string {
 		"REMAGEN":            "remagen",
 		"ST MARIE DU MONT":   "stmariedumont",
 		"SAINTE-MÈRE-ÉGLISE": "stmereeglise",
+		"SMOLENSK":           "smolensk",
 		"STALINGRAD":         "stalingrad",
 		"TOBRUK":             "tobruk",
 		"UTAH BEACH":         "utahbeach",
@@ -874,6 +918,7 @@ func normalizeMapName(rawMapName string) string {
 		"elalamein":       true,
 		"mortain":         true,
 		"elsenbornridge":  true,
+		"smolensk":        true,
 		"tobruk":          true,
 		"invalid":         true,
 	}
@@ -1104,7 +1149,9 @@ func (d *Database) GetLastObjectiveCapturedBefore(ctx context.Context, matchID i
 
 // GetRecentMatchEvents retrieves the most recent events across all active matches
 func (d *Database) GetRecentMatchEvents(ctx context.Context, limit int) ([]MatchEvent, error) {
-	query := `SELECT e.id, e.match_id, e.event_type, e.message, e.details, e.player_ids, e.player_names, e.position_x, e.position_y, e.position_z, e.victim_x, e.victim_y, e.victim_z, e.timestamp
+	query := `SELECT e.id, e.match_id, e.event_type, e.message, e.details, e.player_ids, e.player_names,
+				e.position_x, e.position_y, e.position_z, e.victim_x, e.victim_y, e.victim_z,
+				e.spawn_type, e.spawn_location, e.spawn_team, e.spawn_unit, e.timestamp
 			  FROM match_events e
 			  INNER JOIN matches m ON e.match_id = m.id
 			  WHERE m.is_active = TRUE
@@ -1153,8 +1200,8 @@ func (d *Database) GetRecentMatchEvents(ctx context.Context, limit int) ([]Match
 
 // CreateServer creates a new server entry
 func (d *Database) CreateServer(ctx context.Context, server Server) (*Server, error) {
-	query := `INSERT INTO servers (name, display_name, host, port, password, is_active) 
-			  VALUES ($1, $2, $3, $4, $5, $6) 
+	query := `INSERT INTO servers (name, display_name, host, port, password, is_active, org_id)
+			  VALUES ($1, $2, $3, $4, $5, $6, $7)
 			  RETURNING id, created_at`
 
 	newServer := server
@@ -1165,6 +1212,7 @@ func (d *Database) CreateServer(ctx context.Context, server Server) (*Server, er
 		server.Port,
 		server.Password,
 		server.IsActive,
+		server.OrgID,
 	).Scan(&newServer.ID, &newServer.CreatedAt)
 
 	if err != nil {
@@ -1176,7 +1224,7 @@ func (d *Database) CreateServer(ctx context.Context, server Server) (*Server, er
 
 // GetServer retrieves a server by ID
 func (d *Database) GetServer(ctx context.Context, serverID int64) (*Server, error) {
-	query := `SELECT id, name, display_name, host, port, password, is_active, created_at 
+	query := `SELECT id, name, display_name, host, port, password, is_active, org_id, created_at
 			  FROM servers WHERE id = $1`
 
 	var server Server
@@ -1188,6 +1236,7 @@ func (d *Database) GetServer(ctx context.Context, serverID int64) (*Server, erro
 		&server.Port,
 		&server.Password,
 		&server.IsActive,
+		&server.OrgID,
 		&server.CreatedAt,
 	)
 
@@ -1203,7 +1252,7 @@ func (d *Database) GetServer(ctx context.Context, serverID int64) (*Server, erro
 
 // GetServerByName retrieves a server by name
 func (d *Database) GetServerByName(ctx context.Context, name string) (*Server, error) {
-	query := `SELECT id, name, display_name, host, port, password, is_active, created_at 
+	query := `SELECT id, name, display_name, host, port, password, is_active, org_id, created_at
 			  FROM servers WHERE name = $1`
 
 	var server Server
@@ -1215,6 +1264,7 @@ func (d *Database) GetServerByName(ctx context.Context, name string) (*Server, e
 		&server.Port,
 		&server.Password,
 		&server.IsActive,
+		&server.OrgID,
 		&server.CreatedAt,
 	)
 
@@ -1230,7 +1280,7 @@ func (d *Database) GetServerByName(ctx context.Context, name string) (*Server, e
 
 // ListServers retrieves all active servers
 func (d *Database) ListServers(ctx context.Context) ([]Server, error) {
-	query := `SELECT id, name, display_name, host, port, password, is_active, created_at
+	query := `SELECT id, name, display_name, host, port, password, is_active, org_id, created_at
 			  FROM servers WHERE is_active = TRUE ORDER BY id ASC`
 
 	rows, err := d.pool.Query(ctx, query)
@@ -1250,6 +1300,7 @@ func (d *Database) ListServers(ctx context.Context) ([]Server, error) {
 			&server.Port,
 			&server.Password,
 			&server.IsActive,
+			&server.OrgID,
 			&server.CreatedAt,
 		)
 		if err != nil {
@@ -1367,8 +1418,8 @@ func (d *Database) GetKillEventsInTimeRange(ctx context.Context, matchID int64, 
 	query := `
 	SELECT id, match_id, event_type, message, details, player_ids, player_names,
 		position_x, position_y, position_z, victim_x, victim_y, victim_z, timestamp
-	FROM match_events 
-	WHERE match_id = $1 
+	FROM match_events
+	WHERE match_id = $1
 		AND event_type IN ('kill', 'teamkill')
 		AND timestamp BETWEEN $2 AND $3
 	ORDER BY timestamp DESC`
@@ -1384,7 +1435,7 @@ func (d *Database) GetKillEventsInTimeRange(ctx context.Context, matchID int64, 
 		var event MatchEvent
 		var details, playerIDs, playerNames *string
 
-		err := rows.Scan(&event.ID, &event.MatchID, &event.EventType, &event.Message, &details, &playerIDs, &playerNames, &event.PositionX, &event.PositionY, &event.PositionZ, &event.VictimX, &event.VictimY, &event.VictimZ, &event.SpawnType, &event.SpawnLocation, &event.SpawnTeam, &event.SpawnUnit, &event.Timestamp)
+		err := rows.Scan(&event.ID, &event.MatchID, &event.EventType, &event.Message, &details, &playerIDs, &playerNames, &event.PositionX, &event.PositionY, &event.PositionZ, &event.VictimX, &event.VictimY, &event.VictimZ, &event.Timestamp)
 		if err != nil {
 			d.log.Error("Failed to scan kill event", "error", err)
 			continue
@@ -1450,7 +1501,7 @@ func (d *Database) GetSpawnEvents(ctx context.Context, matchID int64, limit int)
 // GetSpawnEventsInTimeRange retrieves spawn events within a specific time range
 func (d *Database) GetSpawnEventsInTimeRange(ctx context.Context, matchID int64, startTime, endTime time.Time) ([]MatchEvent, error) {
 	query := `SELECT id, match_id, event_type, message, details, player_ids, player_names, position_x, position_y, position_z, victim_x, victim_y, victim_z, spawn_type, spawn_location, spawn_team, spawn_unit, timestamp
-			  FROM match_events 
+			  FROM match_events
 			  WHERE match_id = $1 AND event_type = 'spawn' AND timestamp BETWEEN $2 AND $3
 			  ORDER BY timestamp DESC`
 
@@ -1485,4 +1536,377 @@ func (d *Database) GetSpawnEventsInTimeRange(ctx context.Context, matchID int64,
 	}
 
 	return events, nil
+}
+
+// ==================== Multi-tenancy: Organizations ====================
+
+func (d *Database) CreateOrganization(ctx context.Context, name, slug string) (*Organization, error) {
+	query := `INSERT INTO organizations (name, slug) VALUES ($1, $2) RETURNING id, created_at`
+	var org Organization
+	org.Name = name
+	org.Slug = slug
+	err := d.pool.QueryRow(ctx, query, name, slug).Scan(&org.ID, &org.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create organization: %w", err)
+	}
+	return &org, nil
+}
+
+func (d *Database) GetOrganizationByID(ctx context.Context, id int64) (*Organization, error) {
+	query := `SELECT id, name, slug, created_at FROM organizations WHERE id = $1`
+	var org Organization
+	err := d.pool.QueryRow(ctx, query, id).Scan(&org.ID, &org.Name, &org.Slug, &org.CreatedAt)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, fmt.Errorf("organization not found")
+		}
+		return nil, fmt.Errorf("failed to get organization: %w", err)
+	}
+	return &org, nil
+}
+
+func (d *Database) GetOrganizationBySlug(ctx context.Context, slug string) (*Organization, error) {
+	query := `SELECT id, name, slug, created_at FROM organizations WHERE slug = $1`
+	var org Organization
+	err := d.pool.QueryRow(ctx, query, slug).Scan(&org.ID, &org.Name, &org.Slug, &org.CreatedAt)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, fmt.Errorf("organization not found")
+		}
+		return nil, fmt.Errorf("failed to get organization: %w", err)
+	}
+	return &org, nil
+}
+
+// ==================== Multi-tenancy: Users ====================
+
+func (d *Database) CreateUser(ctx context.Context, email, passwordHash, displayName string, orgID int64, role string) (*User, error) {
+	query := `INSERT INTO users (email, password_hash, display_name, org_id, role)
+			  VALUES ($1, $2, $3, $4, $5)
+			  RETURNING id, is_active, created_at`
+	var user User
+	user.Email = email
+	user.PasswordHash = passwordHash
+	user.DisplayName = displayName
+	user.OrgID = orgID
+	user.Role = role
+	err := d.pool.QueryRow(ctx, query, email, passwordHash, displayName, orgID, role).Scan(
+		&user.ID, &user.IsActive, &user.CreatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create user: %w", err)
+	}
+	return &user, nil
+}
+
+func (d *Database) GetUserByEmail(ctx context.Context, email string) (*User, error) {
+	query := `SELECT id, email, password_hash, display_name, org_id, role, is_active, created_at
+			  FROM users WHERE email = $1`
+	var user User
+	err := d.pool.QueryRow(ctx, query, email).Scan(
+		&user.ID, &user.Email, &user.PasswordHash, &user.DisplayName,
+		&user.OrgID, &user.Role, &user.IsActive, &user.CreatedAt,
+	)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, fmt.Errorf("user not found")
+		}
+		return nil, fmt.Errorf("failed to get user: %w", err)
+	}
+	return &user, nil
+}
+
+func (d *Database) GetUserByID(ctx context.Context, id int64) (*User, error) {
+	query := `SELECT id, email, password_hash, display_name, org_id, role, is_active, created_at
+			  FROM users WHERE id = $1`
+	var user User
+	err := d.pool.QueryRow(ctx, query, id).Scan(
+		&user.ID, &user.Email, &user.PasswordHash, &user.DisplayName,
+		&user.OrgID, &user.Role, &user.IsActive, &user.CreatedAt,
+	)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, fmt.Errorf("user not found")
+		}
+		return nil, fmt.Errorf("failed to get user: %w", err)
+	}
+	return &user, nil
+}
+
+func (d *Database) GetOrgMembers(ctx context.Context, orgID int64) ([]User, error) {
+	query := `SELECT id, email, password_hash, display_name, org_id, role, is_active, created_at
+			  FROM users WHERE org_id = $1 AND is_active = TRUE ORDER BY created_at ASC`
+	rows, err := d.pool.Query(ctx, query, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get org members: %w", err)
+	}
+	defer rows.Close()
+
+	var users []User
+	for rows.Next() {
+		var user User
+		if err := rows.Scan(
+			&user.ID, &user.Email, &user.PasswordHash, &user.DisplayName,
+			&user.OrgID, &user.Role, &user.IsActive, &user.CreatedAt,
+		); err != nil {
+			d.log.Error("Failed to scan user", "error", err)
+			continue
+		}
+		users = append(users, user)
+	}
+	return users, nil
+}
+
+func (d *Database) DeactivateUser(ctx context.Context, userID int64) error {
+	result, err := d.pool.Exec(ctx, `UPDATE users SET is_active = FALSE WHERE id = $1`, userID)
+	if err != nil {
+		return fmt.Errorf("failed to deactivate user: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("user not found")
+	}
+	return nil
+}
+
+// ==================== Multi-tenancy: Invitations ====================
+
+func (d *Database) CreateInvitation(ctx context.Context, orgID int64, email, tokenHash string, invitedBy int64, expiresAt time.Time) (*OrgInvitation, error) {
+	query := `INSERT INTO org_invitations (org_id, email, invite_token, invited_by, expires_at)
+			  VALUES ($1, $2, $3, $4, $5)
+			  RETURNING id, created_at`
+	var inv OrgInvitation
+	inv.OrgID = orgID
+	inv.Email = email
+	inv.InviteToken = tokenHash
+	inv.InvitedBy = invitedBy
+	inv.ExpiresAt = expiresAt
+	err := d.pool.QueryRow(ctx, query, orgID, email, tokenHash, invitedBy, expiresAt).Scan(&inv.ID, &inv.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create invitation: %w", err)
+	}
+	return &inv, nil
+}
+
+func (d *Database) GetInvitationByToken(ctx context.Context, token string) (*OrgInvitation, error) {
+	query := `SELECT id, org_id, email, invite_token, invited_by, expires_at, accepted_at, created_at
+			  FROM org_invitations WHERE invite_token = $1`
+	var inv OrgInvitation
+	err := d.pool.QueryRow(ctx, query, token).Scan(
+		&inv.ID, &inv.OrgID, &inv.Email, &inv.InviteToken, &inv.InvitedBy,
+		&inv.ExpiresAt, &inv.AcceptedAt, &inv.CreatedAt,
+	)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, fmt.Errorf("invitation not found")
+		}
+		return nil, fmt.Errorf("failed to get invitation: %w", err)
+	}
+	return &inv, nil
+}
+
+func (d *Database) AcceptInvitation(ctx context.Context, invitationID int64) error {
+	now := time.Now()
+	result, err := d.pool.Exec(ctx,
+		`UPDATE org_invitations SET accepted_at = $1 WHERE id = $2 AND accepted_at IS NULL`,
+		now, invitationID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to accept invitation: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("invitation not found or already accepted")
+	}
+	return nil
+}
+
+func (d *Database) DeleteInvitationByOrgAndEmail(ctx context.Context, orgID int64, email string) error {
+	_, err := d.pool.Exec(ctx, `DELETE FROM org_invitations WHERE org_id = $1 AND email = $2`, orgID, email)
+	if err != nil {
+		return fmt.Errorf("failed to delete invitation: %w", err)
+	}
+	return nil
+}
+
+func (d *Database) GetPendingInvitations(ctx context.Context, orgID int64) ([]OrgInvitation, error) {
+	query := `SELECT id, org_id, email, invite_token, invited_by, expires_at, accepted_at, created_at
+			  FROM org_invitations WHERE org_id = $1 AND accepted_at IS NULL AND expires_at > NOW()
+			  ORDER BY created_at DESC`
+	rows, err := d.pool.Query(ctx, query, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get pending invitations: %w", err)
+	}
+	defer rows.Close()
+
+	var invitations []OrgInvitation
+	for rows.Next() {
+		var inv OrgInvitation
+		if err := rows.Scan(
+			&inv.ID, &inv.OrgID, &inv.Email, &inv.InviteToken, &inv.InvitedBy,
+			&inv.ExpiresAt, &inv.AcceptedAt, &inv.CreatedAt,
+		); err != nil {
+			d.log.Error("Failed to scan invitation", "error", err)
+			continue
+		}
+		invitations = append(invitations, inv)
+	}
+	return invitations, nil
+}
+
+// ==================== Multi-tenancy: Refresh Tokens ====================
+
+func (d *Database) CreateRefreshToken(ctx context.Context, userID int64, tokenHash, fingerprint string, expiresAt time.Time) error {
+	_, err := d.pool.Exec(ctx,
+		`INSERT INTO refresh_tokens (user_id, token_hash, fingerprint, expires_at) VALUES ($1, $2, $3, $4)`,
+		userID, tokenHash, fingerprint, expiresAt,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create refresh token: %w", err)
+	}
+	return nil
+}
+
+func (d *Database) GetRefreshToken(ctx context.Context, tokenHash string) (*RefreshToken, error) {
+	query := `SELECT id, user_id, token_hash, fingerprint, expires_at, created_at
+			  FROM refresh_tokens WHERE token_hash = $1`
+	var rt RefreshToken
+	err := d.pool.QueryRow(ctx, query, tokenHash).Scan(
+		&rt.ID, &rt.UserID, &rt.TokenHash, &rt.Fingerprint, &rt.ExpiresAt, &rt.CreatedAt,
+	)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, fmt.Errorf("refresh token not found")
+		}
+		return nil, fmt.Errorf("failed to get refresh token: %w", err)
+	}
+	return &rt, nil
+}
+
+func (d *Database) DeleteRefreshToken(ctx context.Context, tokenHash string) error {
+	_, err := d.pool.Exec(ctx, `DELETE FROM refresh_tokens WHERE token_hash = $1`, tokenHash)
+	if err != nil {
+		return fmt.Errorf("failed to delete refresh token: %w", err)
+	}
+	return nil
+}
+
+func (d *Database) DeleteUserRefreshTokens(ctx context.Context, userID int64) error {
+	_, err := d.pool.Exec(ctx, `DELETE FROM refresh_tokens WHERE user_id = $1`, userID)
+	if err != nil {
+		return fmt.Errorf("failed to delete user refresh tokens: %w", err)
+	}
+	return nil
+}
+
+// ==================== Multi-tenancy: Server scoping ====================
+
+func (d *Database) ListServersByOrg(ctx context.Context, orgID int64) ([]Server, error) {
+	query := `SELECT id, name, display_name, host, port, password, is_active, org_id, created_at
+			  FROM servers WHERE org_id = $1 AND is_active = TRUE ORDER BY id ASC`
+	rows, err := d.pool.Query(ctx, query, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list servers by org: %w", err)
+	}
+	defer rows.Close()
+
+	var servers []Server
+	for rows.Next() {
+		var server Server
+		if err := rows.Scan(
+			&server.ID, &server.Name, &server.DisplayName, &server.Host,
+			&server.Port, &server.Password, &server.IsActive, &server.OrgID, &server.CreatedAt,
+		); err != nil {
+			d.log.Error("Failed to scan server", "error", err)
+			continue
+		}
+		servers = append(servers, server)
+	}
+	return servers, nil
+}
+
+func (d *Database) ListAllServersByOrg(ctx context.Context, orgID int64) ([]Server, error) {
+	query := `SELECT id, name, display_name, host, port, password, is_active, org_id, created_at
+			  FROM servers WHERE org_id = $1 ORDER BY id ASC`
+	rows, err := d.pool.Query(ctx, query, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list all servers by org: %w", err)
+	}
+	defer rows.Close()
+
+	var servers []Server
+	for rows.Next() {
+		var server Server
+		if err := rows.Scan(
+			&server.ID, &server.Name, &server.DisplayName, &server.Host,
+			&server.Port, &server.Password, &server.IsActive, &server.OrgID, &server.CreatedAt,
+		); err != nil {
+			d.log.Error("Failed to scan server", "error", err)
+			continue
+		}
+		servers = append(servers, server)
+	}
+	return servers, nil
+}
+
+func (d *Database) GetServerByIDAndOrg(ctx context.Context, serverID, orgID int64) (*Server, error) {
+	query := `SELECT id, name, display_name, host, port, password, is_active, org_id, created_at
+			  FROM servers WHERE id = $1 AND org_id = $2`
+	var server Server
+	err := d.pool.QueryRow(ctx, query, serverID, orgID).Scan(
+		&server.ID, &server.Name, &server.DisplayName, &server.Host,
+		&server.Port, &server.Password, &server.IsActive, &server.OrgID, &server.CreatedAt,
+	)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, fmt.Errorf("server not found")
+		}
+		return nil, fmt.Errorf("failed to get server: %w", err)
+	}
+	return &server, nil
+}
+
+func (d *Database) GetOrgServerIDs(ctx context.Context, orgID int64) ([]int64, error) {
+	query := `SELECT id FROM servers WHERE org_id = $1 AND is_active = TRUE`
+	rows, err := d.pool.Query(ctx, query, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get org server IDs: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+// GetMatchesByOrg returns recent matches for all servers belonging to an org.
+func (d *Database) GetMatchesByOrg(ctx context.Context, orgID int64, limit int) ([]Match, error) {
+	query := `SELECT m.id, m.server_id, m.map_name, m.start_time, m.end_time, m.is_active,
+				m.player_count_peak, m.duration_seconds, m.final_score_allies, m.final_score_axis
+			  FROM matches m
+			  JOIN servers s ON m.server_id = s.id
+			  WHERE s.org_id = $1 AND (m.is_active = true OR m.end_time IS NOT NULL)
+			  ORDER BY m.start_time DESC LIMIT $2`
+	rows, err := d.pool.Query(ctx, query, orgID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get matches by org: %w", err)
+	}
+	defer rows.Close()
+
+	var matches []Match
+	for rows.Next() {
+		var m Match
+		if err := rows.Scan(&m.ID, &m.ServerID, &m.MapName, &m.StartTime, &m.EndTime,
+			&m.IsActive, &m.PlayerCountPeak, &m.DurationSeconds,
+			&m.FinalScoreAllies, &m.FinalScoreAxis); err != nil {
+			d.log.Error("Failed to scan match", "error", err)
+			continue
+		}
+		matches = append(matches, m)
+	}
+	return matches, nil
 }

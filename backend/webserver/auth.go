@@ -3,8 +3,11 @@ package webserver
 import (
 	"encoding/json"
 	"fmt"
+	"hll-radar/auth"
+	"hll-radar/config"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -180,4 +183,83 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(data)
+}
+
+// jwtAuthMiddleware validates JWT Bearer tokens on every request (hosted mode).
+func jwtAuthMiddleware(logger *slog.Logger, jwtSecret string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Skip OPTIONS (CORS preflight)
+			if r.Method == "OPTIONS" {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Whitelist specific paths that don't require auth
+			path := r.URL.Path
+			if path == "/health" ||
+				path == "/api/v1/auth/status" ||
+				path == "/api/v1/auth/signup" ||
+				path == "/api/v1/auth/login" ||
+				path == "/api/v1/auth/refresh" ||
+				path == "/api/v1/auth/invite/accept" ||
+				path == "/ws" ||
+				!strings.HasPrefix(path, "/api/") {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Extract Bearer token
+			authHeader := r.Header.Get("Authorization")
+			if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+				writeJSON(w, http.StatusUnauthorized, map[string]string{
+					"error": "Authentication required. Please log in.",
+				})
+				return
+			}
+
+			tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+			claims, err := auth.ValidateToken(tokenStr, jwtSecret)
+			if err != nil {
+				logger.Debug("JWT validation failed", "error", err)
+				writeJSON(w, http.StatusUnauthorized, map[string]string{
+					"error": "Invalid or expired token.",
+				})
+				return
+			}
+
+			// Verify device fingerprint matches the token
+			if claims.Fingerprint != "" {
+				requestFP := auth.RequestFingerprint(r)
+				if claims.Fingerprint != requestFP {
+					logger.Warn("JWT fingerprint mismatch", "user_id", claims.UserID)
+					writeJSON(w, http.StatusUnauthorized, map[string]string{
+						"error": "Token not valid for this device.",
+					})
+					return
+				}
+			}
+
+			// Set auth context
+			ctx := auth.SetAuthContext(r.Context(), claims.UserID, claims.OrgID, claims.Role)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// requireOwner is a handler wrapper that checks for owner role.
+func requireOwner(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !config.IsHostedMode() {
+			next(w, r)
+			return
+		}
+		if !auth.IsOwner(r.Context()) {
+			writeJSON(w, http.StatusForbidden, map[string]string{
+				"error": "Owner access required.",
+			})
+			return
+		}
+		next(w, r)
+	}
 }

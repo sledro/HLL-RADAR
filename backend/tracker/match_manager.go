@@ -6,6 +6,7 @@ import (
 	"hll-radar/database"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/zMoooooritz/go-let-loose/pkg/hll"
@@ -20,6 +21,7 @@ type WebServerInterface interface {
 
 // MatchManager handles match lifecycle and state management
 type MatchManager struct {
+	mu              sync.RWMutex
 	currentMatch    *database.Match
 	matchStartTime  time.Time
 	db              *database.Database
@@ -42,6 +44,8 @@ func NewMatchManager(db *database.Database, log *slog.Logger, webServer WebServe
 // StartMatch creates a new match and marks it as active
 // If a match is already active, it means an admin force-started a new match
 func (mm *MatchManager) StartMatch(ctx context.Context, mapName string, timestamp time.Time) error {
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
 	// Check if there's already an active match (admin force-start scenario)
 	if mm.currentMatch != nil {
 		mm.log.Warn("⚠️  Match start received while match is active - admin force-started new match",
@@ -69,7 +73,7 @@ func (mm *MatchManager) StartMatch(ctx context.Context, mapName string, timestam
 	}
 
 	// End any other active matches in the database for this server (shouldn't happen, but defensive)
-	if err := mm.db.EndAllMatches(ctx, timestamp); err != nil {
+	if err := mm.db.EndAllMatches(ctx, mm.serverID, timestamp); err != nil {
 		mm.log.Error("Failed to end all previous matches", "error", err)
 		return fmt.Errorf("failed to end previous matches: %w", err)
 	}
@@ -110,6 +114,8 @@ func (mm *MatchManager) StartMatch(ctx context.Context, mapName string, timestam
 
 // EndMatch ends the current active match
 func (mm *MatchManager) EndMatch(ctx context.Context, timestamp time.Time) error {
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
 	if mm.currentMatch == nil {
 		mm.log.Warn("Attempted to end match but no active match exists")
 		return nil
@@ -154,17 +160,23 @@ func (mm *MatchManager) EndMatch(ctx context.Context, timestamp time.Time) error
 
 // GetCurrentMatch returns the current active match, or nil if none
 func (mm *MatchManager) GetCurrentMatch() *database.Match {
+	mm.mu.RLock()
+	defer mm.mu.RUnlock()
 	return mm.currentMatch
 }
 
 // GetMatchStartTime returns the start time of the current match
 func (mm *MatchManager) GetMatchStartTime() time.Time {
+	mm.mu.RLock()
+	defer mm.mu.RUnlock()
 	return mm.matchStartTime
 }
 
 // VerifyAndResumeMatch verifies there is an active match in the database and resumes tracking it
 // Returns error if no active match exists - tracking only starts after receiving MATCH START event
 func (mm *MatchManager) VerifyAndResumeMatch(ctx context.Context) error {
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
 	// If we're waiting for a new match start, don't resume anything
 	if mm.waitingForStart {
 		return fmt.Errorf("waiting for match start event")
@@ -313,6 +325,12 @@ func (mm *MatchManager) DetectAndResumeOrCreateMatch(ctx context.Context, rconCl
 
 // normalizeMapName normalizes a map name for comparison with database values
 func (mm *MatchManager) normalizeMapName(rawMapName string) string {
+	// Strip time-of-day suffixes before lookup
+	stripped := rawMapName
+	for _, suffix := range []string{" NIGHT", " DAWN", " DUSK", " DAY", " Night", " Dawn", " Dusk", " Day"} {
+		stripped = strings.TrimSuffix(stripped, suffix)
+	}
+
 	// Create a mapping from RCON map names to internal names
 	rconToInternal := map[string]string{
 		"CARENTAN":           "carentan",
@@ -328,6 +346,7 @@ func (mm *MatchManager) normalizeMapName(rawMapName string) string {
 		"OMAHA BEACH":        "omahabeach",
 		"PURPLE HEART LANE":  "purpleheartlane",
 		"REMAGEN":            "remagen",
+		"SMOLENSK":           "smolensk",
 		"ST MARIE DU MONT":   "stmariedumont",
 		"SAINTE-MÈRE-ÉGLISE": "stmereeglise",
 		"STALINGRAD":         "stalingrad",
@@ -335,13 +354,16 @@ func (mm *MatchManager) normalizeMapName(rawMapName string) string {
 		"UTAH BEACH":         "utahbeach",
 	}
 
-	// Check if we have a direct mapping
+	// Check if we have a direct mapping (try stripped first, then original)
+	if internalName, exists := rconToInternal[stripped]; exists {
+		return internalName
+	}
 	if internalName, exists := rconToInternal[rawMapName]; exists {
 		return internalName
 	}
 
-	// Fallback: try to normalize the name
-	normalized := strings.ToLower(strings.ReplaceAll(rawMapName, " ", ""))
+	// Fallback: strip suffixes, normalize
+	normalized := strings.ToLower(strings.ReplaceAll(stripped, " ", ""))
 	normalized = strings.ReplaceAll(normalized, "ü", "u")
 	normalized = strings.ReplaceAll(normalized, "è", "e")
 	normalized = strings.ReplaceAll(normalized, "é", "e")

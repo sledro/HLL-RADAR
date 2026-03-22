@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hll-radar/auth"
+	"hll-radar/config"
 	"hll-radar/database"
 	"math"
 	"net/http"
@@ -46,17 +48,44 @@ func parseKillEvent(event database.MatchEvent) KillEventResponse {
 // handleAuthStatus reports whether auth is required and whether the current session is valid.
 // This endpoint is whitelisted from the auth middleware so the frontend can check before rendering.
 func (ws *WebServer) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
-	authRequired := viper.GetBool("crcon.enabled")
+	mode := config.GetMode()
 
+	if config.IsHostedMode() {
+		// This endpoint is whitelisted from JWT middleware, so we validate the token manually
+		authenticated := false
+		authHeader := r.Header.Get("Authorization")
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+			hostedCfg := config.GetHostedConfig()
+			if claims, err := auth.ValidateToken(tokenStr, hostedCfg.JWTSecret); err == nil {
+				// Also verify fingerprint
+				if claims.Fingerprint == "" || claims.Fingerprint == auth.RequestFingerprint(r) {
+					authenticated = true
+				}
+			}
+		}
+		resp := map[string]any{
+			"mode":          mode,
+			"auth_required": true,
+			"authenticated": authenticated,
+			"auth_type":     "jwt",
+		}
+		if turnstileCfg := config.GetTurnstileConfig(); turnstileCfg.SiteKey != "" {
+			resp["turnstile_site_key"] = turnstileCfg.SiteKey
+		}
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	// Standalone mode: check CRCON session
+	authRequired := viper.GetBool("crcon.enabled")
 	authenticated := false
 	if authRequired {
 		cookie, err := r.Cookie("sessionid")
 		if err == nil && cookie.Value != "" {
-			// Check cache first
 			if valid, found := authCache.get(cookie.Value); found {
 				authenticated = valid
 			} else {
-				// Validate with CRCON
 				crconURL := viper.GetString("crcon.url")
 				ttl := time.Duration(viper.GetInt("crcon.cache_ttl_seconds")) * time.Second
 				if ttl == 0 {
@@ -71,9 +100,11 @@ func (ws *WebServer) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]bool{
+	writeJSON(w, http.StatusOK, map[string]any{
+		"mode":          mode,
 		"auth_required": authRequired,
 		"authenticated": authenticated,
+		"auth_type":     "crcon",
 	})
 }
 
@@ -119,18 +150,22 @@ func (ws *WebServer) handleMatchDataAPI(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if matchIDStr == "" {
-		// Return current match data for the specified server
+		if !ws.verifyServerAccess(w, r, serverID) {
+			return
+		}
 		ws.handleCurrentMatchData(w, r, serverID)
 		return
 	}
 
-	// Parse match ID and return specific match data
 	matchID, err := strconv.ParseInt(matchIDStr, 10, 64)
 	if err != nil {
 		http.Error(w, "Invalid match ID", http.StatusBadRequest)
 		return
 	}
 
+	if !ws.verifyMatchAccess(w, r, matchID) {
+		return
+	}
 	ws.handleSpecificMatchData(w, r, matchID)
 }
 
@@ -263,6 +298,9 @@ func (ws *WebServer) handlePlayers(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid server_id parameter", http.StatusBadRequest)
 		return
 	}
+	if !ws.verifyServerAccess(w, r, serverID) {
+		return
+	}
 
 	// Get the active match for the specified server
 	activeMatch, err := ws.db.GetActiveMatch(ctx, serverID)
@@ -297,6 +335,9 @@ func (ws *WebServer) handlePlayerHistory(w http.ResponseWriter, r *http.Request)
 	serverID, err := parseServerID(r)
 	if err != nil {
 		http.Error(w, "Invalid server_id parameter", http.StatusBadRequest)
+		return
+	}
+	if !ws.verifyServerAccess(w, r, serverID) {
 		return
 	}
 
@@ -342,7 +383,28 @@ func (ws *WebServer) handleMatches(w http.ResponseWriter, r *http.Request) {
 		serverID = parsedID
 	}
 
-	matches, err := ws.db.GetMatches(ctx, serverID, 50) // Get last 50 matches
+	var matches []database.Match
+	var err error
+
+	if config.IsHostedMode() {
+		orgID, ok := auth.OrgIDFromContext(r.Context())
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "Authentication required"})
+			return
+		}
+		if serverID > 0 {
+			if !ws.verifyServerAccess(w, r, serverID) {
+				return
+			}
+			matches, err = ws.db.GetMatches(ctx, serverID, 50)
+		} else {
+			// Scope to org's servers
+			matches, err = ws.db.GetMatchesByOrg(ctx, orgID, 50)
+		}
+	} else {
+		matches, err = ws.db.GetMatches(ctx, serverID, 50)
+	}
+
 	if err != nil {
 		ws.log.Error("Failed to get matches", "error", err)
 		http.Error(w, "Failed to get matches", http.StatusInternalServerError)
@@ -357,11 +419,28 @@ func (ws *WebServer) handleServers(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	servers, err := ws.db.ListServers(ctx)
+	var servers []database.Server
+	var err error
+
+	if config.IsHostedMode() {
+		orgID, ok := auth.OrgIDFromContext(r.Context())
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "Authentication required"})
+			return
+		}
+		servers, err = ws.db.ListServersByOrg(ctx, orgID)
+	} else {
+		servers, err = ws.db.ListServers(ctx)
+	}
+
 	if err != nil {
 		ws.log.Error("Failed to get servers", "error", err)
 		http.Error(w, "Failed to get servers", http.StatusInternalServerError)
 		return
+	}
+
+	if servers == nil {
+		servers = []database.Server{}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -375,6 +454,9 @@ func (ws *WebServer) handleMatchData(w http.ResponseWriter, r *http.Request) {
 	matchID, err := parseMatchIDParam(r)
 	if err != nil {
 		http.Error(w, "Invalid match ID", http.StatusBadRequest)
+		return
+	}
+	if !ws.verifyMatchAccess(w, r, matchID) {
 		return
 	}
 
@@ -442,6 +524,9 @@ func (ws *WebServer) handleMatchEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid match ID", http.StatusBadRequest)
 		return
 	}
+	if !ws.verifyMatchAccess(w, r, matchID) {
+		return
+	}
 
 	// Get limit from query params (default 100)
 	limit := 100
@@ -482,6 +567,9 @@ func (ws *WebServer) handleMatchTimeline(w http.ResponseWriter, r *http.Request)
 	matchID, err := parseMatchIDParam(r)
 	if err != nil {
 		http.Error(w, "Invalid match ID", http.StatusBadRequest)
+		return
+	}
+	if !ws.verifyMatchAccess(w, r, matchID) {
 		return
 	}
 
@@ -532,6 +620,9 @@ func (ws *WebServer) handleMatchEventsTimeline(w http.ResponseWriter, r *http.Re
 	matchID, err := parseMatchIDParam(r)
 	if err != nil {
 		http.Error(w, "Invalid match ID", http.StatusBadRequest)
+		return
+	}
+	if !ws.verifyMatchAccess(w, r, matchID) {
 		return
 	}
 
@@ -602,6 +693,9 @@ func (ws *WebServer) handleKillEventsTimeline(w http.ResponseWriter, r *http.Req
 		http.Error(w, "Invalid match ID", http.StatusBadRequest)
 		return
 	}
+	if !ws.verifyMatchAccess(w, r, matchID) {
+		return
+	}
 
 	// Get timestamp parameter
 	timestampStr := r.URL.Query().Get("timestamp")
@@ -670,6 +764,9 @@ func (ws *WebServer) handleKillEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid match ID", http.StatusBadRequest)
 		return
 	}
+	if !ws.verifyMatchAccess(w, r, matchID) {
+		return
+	}
 
 	// Get limit from query params (default 1000)
 	limit := 1000
@@ -717,6 +814,9 @@ func (ws *WebServer) handleMatchScore(w http.ResponseWriter, r *http.Request) {
 	matchID, err := parseMatchIDParam(r)
 	if err != nil {
 		http.Error(w, "Invalid match ID", http.StatusBadRequest)
+		return
+	}
+	if !ws.verifyMatchAccess(w, r, matchID) {
 		return
 	}
 
@@ -799,6 +899,9 @@ func (ws *WebServer) handleSpawnEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid match ID", http.StatusBadRequest)
 		return
 	}
+	if !ws.verifyMatchAccess(w, r, matchID) {
+		return
+	}
 
 	// Get limit from query params (default 100)
 	limit := 100
@@ -840,6 +943,9 @@ func (ws *WebServer) handleSpawnEventsTimeline(w http.ResponseWriter, r *http.Re
 	matchID, err := parseMatchIDParam(r)
 	if err != nil {
 		http.Error(w, "Invalid match ID", http.StatusBadRequest)
+		return
+	}
+	if !ws.verifyMatchAccess(w, r, matchID) {
 		return
 	}
 
@@ -912,9 +1018,13 @@ func (ws *WebServer) handlePlayerAction(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	if !ws.verifyServerAccess(w, r, req.ServerID) {
+		return
+	}
+
 	if err := actionFunc(req.ServerID, req.PlayerName, req.Reason); err != nil {
-		ws.log.Error(fmt.Sprintf("Failed to %s player", actionName), "player_name", req.PlayerName, "error", err)
-		http.Error(w, fmt.Sprintf(`{"error":"failed to %s player: %s"}`, actionName, err.Error()), http.StatusInternalServerError)
+		ws.log.Error("Player action failed", "action", actionName, "player", req.PlayerName, "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("Failed to %s player", actionName)})
 		return
 	}
 
@@ -1186,6 +1296,9 @@ func (ws *WebServer) handleMatchSpawnPoints(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "Invalid match ID", http.StatusBadRequest)
 		return
 	}
+	if !ws.verifyMatchAccess(w, r, matchID) {
+		return
+	}
 
 	cacheKey := fmt.Sprintf("spawn_points:%d", matchID)
 	if cached, ok := ws.cache.Get(cacheKey); ok {
@@ -1282,6 +1395,9 @@ func (ws *WebServer) handleLiveSpawns(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid server_id parameter", http.StatusBadRequest)
 		return
 	}
+	if !ws.verifyServerAccess(w, r, serverID) {
+		return
+	}
 
 	spawns := ws.getLiveSpawnsFunc(serverID)
 	if spawns == nil {
@@ -1314,6 +1430,10 @@ func (ws *WebServer) handleMessagePlayer(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	if !ws.verifyServerAccess(w, r, req.ServerID) {
+		return
+	}
+
 	// Limit message length
 	if len(req.Message) > 200 {
 		http.Error(w, `{"error":"message too long (max 200 chars)"}`, http.StatusBadRequest)
@@ -1322,7 +1442,7 @@ func (ws *WebServer) handleMessagePlayer(w http.ResponseWriter, r *http.Request)
 
 	if err := ws.messagePlayerFunc(req.ServerID, req.PlayerName, req.Message); err != nil {
 		ws.log.Error("Failed to message player", "player_name", req.PlayerName, "error", err)
-		http.Error(w, fmt.Sprintf(`{"error":"failed to send message: %s"}`, err.Error()), http.StatusInternalServerError)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to send message"})
 		return
 	}
 
@@ -1338,6 +1458,9 @@ func (ws *WebServer) handleSaveMatchStrongPoints(w http.ResponseWriter, r *http.
 	matchID, err := strconv.ParseInt(vars["id"], 10, 64)
 	if err != nil {
 		http.Error(w, `{"error":"invalid match ID"}`, http.StatusBadRequest)
+		return
+	}
+	if !ws.verifyMatchAccess(w, r, matchID) {
 		return
 	}
 
@@ -1364,6 +1487,9 @@ func (ws *WebServer) handleGetMatchStrongPoints(w http.ResponseWriter, r *http.R
 	matchID, err := strconv.ParseInt(vars["id"], 10, 64)
 	if err != nil {
 		http.Error(w, `{"error":"invalid match ID"}`, http.StatusBadRequest)
+		return
+	}
+	if !ws.verifyMatchAccess(w, r, matchID) {
 		return
 	}
 

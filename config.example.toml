@@ -1,6 +1,8 @@
 ##############################
 #### Global configuration ####
 ##############################
+# This is the standalone (single-tenant) config example.
+# For hosted multi-tenant mode, see config.hosted.example.toml
 [global]
 log_level = "info"
 log_file = true

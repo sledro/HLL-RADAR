@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hll-radar/auth"
+	"hll-radar/config"
 	"hll-radar/database"
 	"math"
 	"net/http"
@@ -15,9 +17,24 @@ import (
 
 // wsClient wraps a WebSocket connection with a write mutex and send channel
 type wsClient struct {
-	conn    *websocket.Conn
-	send    chan []byte
-	writeMu sync.Mutex
+	conn      *websocket.Conn
+	send      chan []byte
+	writeMu   sync.Mutex
+	orgID     int64   // 0 in standalone mode (receives all broadcasts)
+	serverIDs []int64 // cached org server IDs for filtering
+}
+
+// canSeeServer returns true if this client should receive broadcasts for the given server.
+func (c *wsClient) canSeeServer(serverID int64) bool {
+	if c.orgID == 0 {
+		return true // standalone mode: see everything
+	}
+	for _, id := range c.serverIDs {
+		if id == serverID {
+			return true
+		}
+	}
+	return false
 }
 
 // writeMessage safely writes a message to the WebSocket connection
@@ -37,6 +54,31 @@ func (c *wsClient) writePump() {
 }
 
 func (ws *WebServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	// In hosted mode, authenticate via JWT query parameter
+	var orgID int64
+	var serverIDs []int64
+	if config.IsHostedMode() {
+		tokenStr := r.URL.Query().Get("token")
+		if tokenStr == "" {
+			http.Error(w, "Authentication required", http.StatusUnauthorized)
+			return
+		}
+		hostedCfg := config.GetHostedConfig()
+		claims, err := auth.ValidateToken(tokenStr, hostedCfg.JWTSecret)
+		if err != nil {
+			http.Error(w, "Invalid token", http.StatusUnauthorized)
+			return
+		}
+		// Verify device fingerprint
+		if claims.Fingerprint != "" && claims.Fingerprint != auth.RequestFingerprint(r) {
+			http.Error(w, "Token not valid for this device", http.StatusUnauthorized)
+			return
+		}
+		orgID = claims.OrgID
+		ctx := context.Background()
+		serverIDs, _ = ws.db.GetOrgServerIDs(ctx, orgID)
+	}
+
 	conn, err := ws.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		ws.log.Error("Failed to upgrade WebSocket connection", "error", err)
@@ -45,8 +87,10 @@ func (ws *WebServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	defer conn.Close()
 
 	client := &wsClient{
-		conn: conn,
-		send: make(chan []byte, 256),
+		conn:      conn,
+		send:      make(chan []byte, 256),
+		orgID:     orgID,
+		serverIDs: serverIDs,
 	}
 
 	ws.clientMu.Lock()
@@ -87,27 +131,29 @@ func (ws *WebServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Start write pump goroutine
 	go client.writePump()
 
-	// Send initial data for all servers
+	// Send initial data for servers this client can see
 	ctx := context.Background()
-	servers, err := ws.db.ListServers(ctx)
-	if err == nil {
-		for _, server := range servers {
-			activeMatch, err := ws.db.GetActiveMatch(ctx, server.ID)
-			if err == nil && activeMatch != nil {
-				players, err := ws.db.GetCurrentPlayerPositions(ctx, activeMatch.ID)
+	var servers []database.Server
+	if config.IsHostedMode() && orgID > 0 {
+		servers, _ = ws.db.ListServersByOrg(ctx, orgID)
+	} else {
+		servers, _ = ws.db.ListServers(ctx)
+	}
+	for _, server := range servers {
+		activeMatch, err := ws.db.GetActiveMatch(ctx, server.ID)
+		if err == nil && activeMatch != nil {
+			players, err := ws.db.GetCurrentPlayerPositions(ctx, activeMatch.ID)
+			if err == nil {
+				message := WebSocketMessage{
+					Type: PlayerUpdateMsg,
+					Payload: PlayerUpdatePayload{
+						Players:  players,
+						ServerID: server.ID,
+					},
+				}
+				data, err := json.Marshal(message)
 				if err == nil {
-					message := WebSocketMessage{
-						Type: PlayerUpdateMsg,
-						Payload: PlayerUpdatePayload{
-							Players:  players,
-							ServerID: server.ID,
-						},
-					}
-
-					data, err := json.Marshal(message)
-					if err == nil {
-						client.writeMessage(websocket.TextMessage, data)
-					}
+					client.writeMessage(websocket.TextMessage, data)
 				}
 			}
 		}
@@ -130,24 +176,42 @@ func (ws *WebServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	ws.clientMu.Unlock()
 }
 
-// handleBroadcasts reads from the broadcast channel and sends messages to all connected clients
+// handleBroadcasts reads from the broadcast channel and sends messages to all connected clients.
+// In hosted mode, messages are filtered so clients only receive data for their org's servers.
 func (ws *WebServer) handleBroadcasts() {
 	for data := range ws.broadcast {
+		// Extract serverID from the message for tenant filtering
+		var serverID int64
+		if config.IsHostedMode() {
+			var msg struct {
+				Payload json.RawMessage `json:"payload"`
+			}
+			if json.Unmarshal(data, &msg) == nil {
+				var payload struct {
+					ServerID int64 `json:"server_id"`
+				}
+				json.Unmarshal(msg.Payload, &payload)
+				serverID = payload.ServerID
+			}
+		}
+
 		ws.clientMu.RLock()
 		ws.log.Debug("Broadcasting to clients", "client_count", len(ws.clients), "data_size", len(data))
 
 		var failedClients []*wsClient
 		for client := range ws.clients {
+			// In hosted mode, filter by server visibility
+			if serverID > 0 && !client.canSeeServer(serverID) {
+				continue
+			}
 			select {
 			case client.send <- data:
 			default:
-				// Client's send buffer is full, mark for removal
 				failedClients = append(failedClients, client)
 			}
 		}
 		ws.clientMu.RUnlock()
 
-		// Remove failed clients outside the read lock
 		if len(failedClients) > 0 {
 			ws.clientMu.Lock()
 			for _, client := range failedClients {
