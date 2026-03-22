@@ -472,6 +472,12 @@ class ApiClient {
       method: "DELETE",
     });
   }
+
+  async toggleServer(serverId: number): Promise<{ status: string; is_active: boolean }> {
+    return this.request(`/api/v1/servers/${serverId}/toggle`, {
+      method: "POST",
+    });
+  }
 }
 
 export const apiClient = new ApiClient();

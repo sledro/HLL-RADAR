@@ -770,3 +770,48 @@ func (ws *WebServer) handleDeleteServer(w http.ResponseWriter, r *http.Request) 
 	ws.log.Info("Server deactivated", "server_id", serverID, "org_id", orgID)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deactivated"})
 }
+
+func (ws *WebServer) handleToggleServer(w http.ResponseWriter, r *http.Request) {
+	orgID, _ := auth.OrgIDFromContext(r.Context())
+
+	serverID, err := strconv.ParseInt(mux.Vars(r)["id"], 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid server ID"})
+		return
+	}
+
+	ctx := r.Context()
+	server, err := ws.db.GetServerByIDAndOrg(ctx, serverID, orgID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "Server not found"})
+		return
+	}
+
+	// Toggle active state
+	server.IsActive = !server.IsActive
+	if err := ws.db.UpdateServer(ctx, *server); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to update server"})
+		return
+	}
+
+	// Start or stop tracker accordingly
+	if ws.trackerManager != nil {
+		if server.IsActive {
+			if err := ws.trackerManager.StartServer(serverID); err != nil {
+				ws.log.Error("Failed to start tracker", "error", err, "server_id", serverID)
+			}
+		} else {
+			ws.trackerManager.StopServer(serverID)
+		}
+	}
+
+	status := "paused"
+	if server.IsActive {
+		status = "active"
+	}
+	ws.log.Info("Server toggled", "server_id", serverID, "status", status)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":    status,
+		"is_active": server.IsActive,
+	})
+}

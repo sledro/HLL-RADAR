@@ -200,6 +200,15 @@ export function OrgSettingsPage() {
     }
   };
 
+  const handleToggleServer = async (serverId: number) => {
+    try {
+      await apiClient.toggleServer(serverId);
+      loadServers();
+    } catch (err) {
+      setServerError(err instanceof Error ? err.message : "Failed to toggle server");
+    }
+  };
+
   const handleTestServer = async (serverId: number) => {
     setTestResults((prev) => ({ ...prev, [serverId]: "testing..." }));
     try {
@@ -269,7 +278,7 @@ export function OrgSettingsPage() {
                   {server.host}:{server.port}
                 </td>
                 <td style={styles.td}>
-                  {server.is_active ? "Active" : "Inactive"}
+                  {server.is_active ? "Active" : "Paused"}
                   {testResults[server.id] && (
                     <span style={{ marginLeft: "0.5rem", color: testResults[server.id] === "connected" ? "#6bff6b" : "#ff6b6b" }}>
                       ({testResults[server.id]})
@@ -283,6 +292,14 @@ export function OrgSettingsPage() {
                   >
                     Test
                   </button>
+                  {auth.isOwner && (
+                    <button
+                      style={{ ...styles.testBtn, background: server.is_active ? "#e67e22" : "#27ae60" }}
+                      onClick={() => handleToggleServer(server.id)}
+                    >
+                      {server.is_active ? "Pause" : "Resume"}
+                    </button>
+                  )}
                   {auth.isOwner && (
                     <button
                       style={styles.removeBtn}
