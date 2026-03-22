@@ -159,12 +159,16 @@ func EnsureDatabase(connectionString string, logger *slog.Logger) error {
 
 	// Connect to 'postgres' system database to create the target database
 	config.ConnConfig.Database = "postgres"
+	sslmode := "disable"
+	if config.ConnConfig.TLSConfig != nil {
+		sslmode = "require"
+	}
 	systemConnStr := fmt.Sprintf("postgres://%s:%s@%s:%d/postgres?sslmode=%s",
 		config.ConnConfig.User,
 		config.ConnConfig.Password,
 		config.ConnConfig.Host,
 		config.ConnConfig.Port,
-		"disable", // Use sslmode from original if needed
+		sslmode,
 	)
 
 	// Create a single connection to check/create database
@@ -521,17 +525,17 @@ func (d *Database) GetActiveMatch(ctx context.Context, serverID int64) (*Match, 
 	return &match, nil
 }
 
-func (d *Database) EndAllMatches(ctx context.Context, endTime time.Time) error {
+func (d *Database) EndAllMatches(ctx context.Context, serverID int64, endTime time.Time) error {
 	query := `
-	UPDATE matches 
+	UPDATE matches
 	SET is_active = FALSE, end_time = $1,
 		duration_seconds = EXTRACT(EPOCH FROM ($1 - start_time))::INTEGER
-	WHERE is_active = TRUE
+	WHERE is_active = TRUE AND server_id = $2
 	`
 
-	_, err := d.pool.Exec(ctx, query, endTime)
+	_, err := d.pool.Exec(ctx, query, endTime, serverID)
 	if err != nil {
-		return fmt.Errorf("failed to end all active matches: %w", err)
+		return fmt.Errorf("failed to end all active matches for server %d: %w", serverID, err)
 	}
 
 	return nil
@@ -1143,7 +1147,9 @@ func (d *Database) GetLastObjectiveCapturedBefore(ctx context.Context, matchID i
 
 // GetRecentMatchEvents retrieves the most recent events across all active matches
 func (d *Database) GetRecentMatchEvents(ctx context.Context, limit int) ([]MatchEvent, error) {
-	query := `SELECT e.id, e.match_id, e.event_type, e.message, e.details, e.player_ids, e.player_names, e.position_x, e.position_y, e.position_z, e.victim_x, e.victim_y, e.victim_z, e.timestamp
+	query := `SELECT e.id, e.match_id, e.event_type, e.message, e.details, e.player_ids, e.player_names,
+				e.position_x, e.position_y, e.position_z, e.victim_x, e.victim_y, e.victim_z,
+				e.spawn_type, e.spawn_location, e.spawn_team, e.spawn_unit, e.timestamp
 			  FROM match_events e
 			  INNER JOIN matches m ON e.match_id = m.id
 			  WHERE m.is_active = TRUE
@@ -1410,8 +1416,8 @@ func (d *Database) GetKillEventsInTimeRange(ctx context.Context, matchID int64, 
 	query := `
 	SELECT id, match_id, event_type, message, details, player_ids, player_names,
 		position_x, position_y, position_z, victim_x, victim_y, victim_z, timestamp
-	FROM match_events 
-	WHERE match_id = $1 
+	FROM match_events
+	WHERE match_id = $1
 		AND event_type IN ('kill', 'teamkill')
 		AND timestamp BETWEEN $2 AND $3
 	ORDER BY timestamp DESC`
@@ -1427,7 +1433,7 @@ func (d *Database) GetKillEventsInTimeRange(ctx context.Context, matchID int64, 
 		var event MatchEvent
 		var details, playerIDs, playerNames *string
 
-		err := rows.Scan(&event.ID, &event.MatchID, &event.EventType, &event.Message, &details, &playerIDs, &playerNames, &event.PositionX, &event.PositionY, &event.PositionZ, &event.VictimX, &event.VictimY, &event.VictimZ, &event.SpawnType, &event.SpawnLocation, &event.SpawnTeam, &event.SpawnUnit, &event.Timestamp)
+		err := rows.Scan(&event.ID, &event.MatchID, &event.EventType, &event.Message, &details, &playerIDs, &playerNames, &event.PositionX, &event.PositionY, &event.PositionZ, &event.VictimX, &event.VictimY, &event.VictimZ, &event.Timestamp)
 		if err != nil {
 			d.log.Error("Failed to scan kill event", "error", err)
 			continue

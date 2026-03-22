@@ -230,7 +230,11 @@ func (ws *WebServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 		ws.log.Error("Failed to store refresh token", "error", err)
 	}
 
-	org, _ := ws.db.GetOrganizationByID(ctx, user.OrgID)
+	org, err := ws.db.GetOrganizationByID(ctx, user.OrgID)
+	if err != nil || org == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Organization not found"})
+		return
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"access_token":  accessToken,
@@ -553,7 +557,11 @@ func (ws *WebServer) handleAcceptInvite(w http.ResponseWriter, r *http.Request) 
 
 	ws.db.CreateRefreshToken(ctx, user.ID, auth.HashToken(refreshToken), fingerprint, time.Now().Add(refreshTTL))
 
-	org, _ := ws.db.GetOrganizationByID(ctx, inv.OrgID)
+	org, err := ws.db.GetOrganizationByID(ctx, inv.OrgID)
+	if err != nil || org == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Organization not found"})
+		return
+	}
 
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"access_token":  accessToken,
