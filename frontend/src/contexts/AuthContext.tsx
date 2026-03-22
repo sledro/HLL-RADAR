@@ -130,6 +130,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const logout = useCallback(() => {
+    // Revoke refresh tokens server-side (best-effort)
+    const token = localStorage.getItem("access_token");
+    if (token) {
+      fetch(`${apiClient["baseUrl"]}/api/v1/auth/logout`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      }).catch(() => {});
+    }
     localStorage.removeItem("access_token");
     localStorage.removeItem("refresh_token");
     localStorage.removeItem("user");

@@ -414,12 +414,12 @@ class ApiClient {
     password: string,
     displayName: string
   ): Promise<AuthResponse> {
-    const url = `${this.baseUrl}/api/v1/auth/accept-invite`;
+    const url = `${this.baseUrl}/api/v1/auth/invite/accept`;
     const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        token: inviteToken,
+        invite_token: inviteToken,
         password,
         display_name: displayName,
       }),

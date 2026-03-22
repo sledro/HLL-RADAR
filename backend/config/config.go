@@ -36,14 +36,15 @@ type SMTPConfig struct {
 }
 
 // Load loads the configuration from config.toml, with environment variable overrides.
-// Environment variables use the prefix HLL_ and double underscores for nesting:
+// Environment variables use the prefix HLL_ with underscores separating key segments:
 //
-//	HLL_GLOBAL__MODE=hosted
-//	HLL_DATABASE__HOST=postgres.railway.internal
-//	HLL_DATABASE__PORT=5432
-//	HLL_HOSTED__JWT_SECRET=...
-//	HLL_SMTP__HOST=smtp.example.com
-//	HLL_WEBSERVER__PORT=8080
+//	HLL_GLOBAL_MODE=hosted
+//	HLL_DATABASE_HOST=postgres.railway.internal
+//	HLL_DATABASE_PORT=5432
+//	HLL_HOSTED_JWT_SECRET=...
+//	HLL_SMTP_HOST=smtp.example.com
+//	HLL_WEBSERVER_PORT=8080
+//	HLL_TURNSTILE_SITE_KEY=...
 //
 // If DATABASE_URL is set (e.g. by Railway), it is parsed and used for database config.
 func Load() error {
@@ -102,11 +103,12 @@ func Load() error {
 	viper.SetDefault("turnstile.secret_key", "")
 
 	// Enable environment variable overrides with HLL_ prefix.
-	// Uses "__" (double underscore) as the key delimiter for nested keys:
-	//   HLL_DATABASE__HOST  →  database.host
-	//   HLL_HOSTED__JWT_SECRET  →  hosted.jwt_secret
+	// Dots in config keys map to underscores in env var names:
+	//   HLL_DATABASE_HOST  →  database.host
+	//   HLL_HOSTED_JWT_SECRET  →  hosted.jwt_secret
+	//   HLL_SMTP_HOST  →  smtp.host
 	viper.SetEnvPrefix("HLL")
-	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "__"))
+	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	viper.AutomaticEnv()
 
 	// Try to read config file — not required if env vars provide all config

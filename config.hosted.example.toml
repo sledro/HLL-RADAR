@@ -66,3 +66,12 @@ port = 587
 username = "noreply@example.com"
 password = "smtp-password"
 from = "HLL RADAR <noreply@example.com>"
+
+##############################
+### Cloudflare Turnstile (Optional) ###
+##############################
+# Adds captcha verification to login/signup pages
+# Get keys from: https://dash.cloudflare.com/turnstile
+# [turnstile]
+# site_key = "0x4AAAA..."
+# secret_key = "0x4AAAA..."

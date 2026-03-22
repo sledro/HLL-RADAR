@@ -48,17 +48,18 @@ func generateRandomHex(nBytes int) (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// DeviceFingerprint produces a SHA-256 hash of the client's IP and User-Agent.
+// DeviceFingerprint produces a SHA-256 hash of the client's User-Agent.
 // This is embedded in JWT claims and stored alongside refresh tokens so that
-// tokens cannot be used from a different device/network.
-func DeviceFingerprint(ip, userAgent string) string {
-	h := sha256.Sum256([]byte(ip + "|" + userAgent))
+// tokens cannot be used from a different browser/device.
+// Note: IP is intentionally excluded to avoid lockouts on network changes.
+func DeviceFingerprint(userAgent string) string {
+	h := sha256.Sum256([]byte(userAgent))
 	return hex.EncodeToString(h[:])
 }
 
-// RequestFingerprint extracts IP and User-Agent from an HTTP request and returns the fingerprint.
+// RequestFingerprint extracts User-Agent from an HTTP request and returns the fingerprint.
 func RequestFingerprint(r *http.Request) string {
-	return DeviceFingerprint(ClientIP(r), r.UserAgent())
+	return DeviceFingerprint(r.UserAgent())
 }
 
 // ClientIP extracts the real client IP from a request, checking X-Forwarded-For

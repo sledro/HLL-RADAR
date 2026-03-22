@@ -271,7 +271,7 @@ export function OrgSettingsPage() {
                 <td style={styles.td}>
                   {server.is_active ? "Active" : "Inactive"}
                   {testResults[server.id] && (
-                    <span style={{ marginLeft: "0.5rem", color: testResults[server.id] === "ok" ? "#6bff6b" : "#ff6b6b" }}>
+                    <span style={{ marginLeft: "0.5rem", color: testResults[server.id] === "connected" ? "#6bff6b" : "#ff6b6b" }}>
                       ({testResults[server.id]})
                     </span>
                   )}
