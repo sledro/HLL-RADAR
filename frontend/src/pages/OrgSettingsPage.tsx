@@ -154,7 +154,7 @@ export function OrgSettingsPage() {
   const loadServers = async () => {
     try {
       const s = await apiClient.getServers();
-      setServers(s);
+      setServers(s || []);
     } catch {
       setServerError("Failed to load servers");
     }
@@ -163,7 +163,7 @@ export function OrgSettingsPage() {
   const loadMembers = async () => {
     try {
       const m = await apiClient.getOrgMembers();
-      setMembers(m);
+      setMembers(m || []);
     } catch {
       setMemberError("Failed to load members");
     }
